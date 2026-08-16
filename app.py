@@ -247,7 +247,7 @@ def _alerts_table():
 # ---------------------------------------------------------------------------
 with gr.Blocks(title="FloodGuard AI") as demo:
     gr.Markdown(
-        "# FloodGuard AI: Phase 1 Working Pipeline\n"
+        "# FloodGuard AI\n"
         "Early warning, not late reaction. Upload real, or sample, rainfall and "
         "water level data to run the actual cleaning and threshold detection "
         "logic, then classify field scenarios the same way a responder would."
