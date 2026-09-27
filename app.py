@@ -15,6 +15,10 @@ Deploy on Render as a Web Service:
 
 Required environment variables (set on Render's Environment tab):
     ADMIN_PASSWORD          password gating every admin action below
+    DATABASE_URL            Postgres connection string (e.g. from Supabase),
+                            so readings, alerts, contacts, and water levels
+                            survive restarts and redeploys instead of living
+                            in memory / ephemeral JSON files.
 
 Outbound alerts (optional, only active once configured):
     Email: SMTP_USER and SMTP_PASSWORD (a Gmail address and app password).
@@ -46,6 +50,8 @@ from email.message import EmailMessage
 import gradio as gr
 import pandas as pd
 
+import db
+
 try:
     from twilio.rest import Client as TwilioClient
     TWILIO_AVAILABLE = True
@@ -53,15 +59,12 @@ except ImportError:
     TWILIO_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
-# In memory database for the live dashboard. Swap this for a real database
-# such as Firebase, Supabase, or Airtable later. The rest of the pipeline
-# does not need to change.
+# Real Postgres-backed persistence (see db.py). Readings, alerts, contacts,
+# and water levels all live in the database now, so they survive restarts,
+# redeploys, and Render's free tier spin-downs. init_db() creates the tables
+# on first run and is a no-op after that.
 # ---------------------------------------------------------------------------
-READINGS = []   # every cleaned row ever ingested, across all CSV uploads
-ALERTS = []     # every alert raised, newest first. Three sources: manual field
-                # reports, automatic ones from an uploaded CSV, and automatic
-                # ones from the scheduled 24 hour check.
-_SEEN_ALERT_KEYS = set()  # (community, timestamp) pairs already alerted from CSV uploads
+db.init_db()
 
 FLOOD_WATER_THRESHOLD_M = 3.2       # matches Section 6 exploratory analysis output
 FLOOD_RAINFALL_THRESHOLD_MM = 80.0  # 24h rainfall associated with historical flood events
@@ -86,50 +89,21 @@ COMMUNITY_COORDS = {
     "Mepe": (6.083, 0.433),
     "Anloga": (5.792, 0.900),
     "Sokpoe": (5.95, 0.62),
+    "New Legon": (5.680, -0.170),
 }
 COMMUNITIES = list(COMMUNITY_COORDS.keys()) + ["All communities"]
 
 
-# ---------------------------------------------------------------------------
-# Persistence helpers. All three files live next to app.py. Same limitation
-# as the portfolio app's SQLite database: Render's free tier filesystem is
-# ephemeral, so these can be wiped on redeploy or restart.
-# ---------------------------------------------------------------------------
-SUBSCRIBERS_FILE = "subscribers.json"
-WATER_LEVELS_FILE = "water_levels.json"
-
-
-def _load_json(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception:
-            return default
-    return default
-
-
-def _save_json(path, data):
-    try:
-        with open(path, "w") as f:
-            json.dump(data, f)
-    except Exception:
-        pass
-
-
-SUBSCRIBERS = _load_json(SUBSCRIBERS_FILE, [])
-LATEST_WATER_LEVEL = _load_json(WATER_LEVELS_FILE, {})
-
-
 def _subscriber_counts_table():
-    if not SUBSCRIBERS:
+    rows = db.subscriber_counts()
+    if not rows:
         return pd.DataFrame(columns=["community", "contacts"])
-    df = pd.DataFrame(SUBSCRIBERS)
-    return df.groupby("community").size().reset_index(name="contacts")
+    return pd.DataFrame(rows)
 
 
 def _water_levels_table():
-    rows = [{"community": c, "last_reported_water_level_m": LATEST_WATER_LEVEL.get(c, "not yet set")}
+    latest = db.get_water_levels()
+    rows = [{"community": c, "last_reported_water_level_m": latest.get(c, "not yet set")}
             for c in COMMUNITY_COORDS]
     return pd.DataFrame(rows)
 
@@ -167,11 +141,8 @@ def bulk_import_contacts(password, community, file):
     if not phone_col and not email_col:
         return "The CSV needs at least a 'phone' or 'email' column.", _subscriber_counts_table()
 
-    existing_keys = {
-        (s["community"].strip().lower(), s.get("phone", ""), s.get("email", ""))
-        for s in SUBSCRIBERS
-    }
     added, skipped = 0, 0
+    seen_in_this_upload = set()
     for _, row in raw.iterrows():
         phone = str(row[phone_col]).strip() if phone_col and pd.notna(row.get(phone_col)) else ""
         email = str(row[email_col]).strip() if email_col and pd.notna(row.get(email_col)) else ""
@@ -180,14 +151,13 @@ def bulk_import_contacts(password, community, file):
             skipped += 1
             continue
         key = (community.strip().lower(), phone, email)
-        if key in existing_keys:
+        if key in seen_in_this_upload or db.subscriber_exists(community, phone, email):
             skipped += 1
             continue
-        SUBSCRIBERS.append({"name": name, "community": community, "phone": phone, "email": email})
-        existing_keys.add(key)
+        db.add_subscriber(name, community, phone, email)
+        seen_in_this_upload.add(key)
         added += 1
 
-    _save_json(SUBSCRIBERS_FILE, SUBSCRIBERS)
     return (
         f"Imported {added} new contact(s) into **{community}** "
         f"({skipped} skipped as duplicates or empty rows).",
@@ -199,8 +169,7 @@ def update_water_level(password, community, level):
     ok, err = _check_admin_password(password)
     if not ok:
         return err, _water_levels_table()
-    LATEST_WATER_LEVEL[community] = float(level or 0)
-    _save_json(WATER_LEVELS_FILE, LATEST_WATER_LEVEL)
+    db.set_water_level(community, float(level or 0))
     return (
         f"Updated **{community}**'s water level to {level}m. "
         f"This is what the automatic 24h check will use until it is updated again.",
@@ -266,7 +235,7 @@ def _dispatch_outbound(community, level, reasoning):
         return ""
 
     targets = [
-        s for s in SUBSCRIBERS
+        s for s in db.get_subscribers()
         if s["community"].strip().lower() == community.strip().lower()
         or s["community"].strip().lower() == "all communities"
     ]
@@ -326,21 +295,14 @@ def _risk_level(rainfall_mm, water_level_m, notes=""):
 
 
 def _raise_alert(time_str, community, rainfall_mm, water_level_m, level, notes, source):
-    ALERTS.insert(0, {
-        "time": time_str,
-        "community": community,
-        "rainfall_mm": rainfall_mm,
-        "water_level_m": water_level_m,
-        "risk_level": level,
-        "notes": notes or "",
-        "source": source,
-    })
+    db.add_alert(time_str, community, rainfall_mm, water_level_m, level, notes, source)
 
 
 def _alerts_table():
-    if not ALERTS:
+    rows = db.get_alerts()
+    if not rows:
         return pd.DataFrame(columns=["time", "community", "rainfall_mm", "water_level_m", "risk_level", "notes", "source"])
-    return pd.DataFrame(ALERTS)
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +339,10 @@ def run_scheduled_check():
     by the 24 hour background loop and the admin 'Run check now' button."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = []
+    latest_water_levels = db.get_water_levels()
     for community, (lat, lon) in COMMUNITY_COORDS.items():
         rainfall_mm, err = _fetch_rainfall_mm(lat, lon)
-        water_level_m = LATEST_WATER_LEVEL.get(community, 0.0)
+        water_level_m = latest_water_levels.get(community, 0.0)
         notes = "Automatic 24h check."
         if err:
             notes += f" Rainfall fetch failed, treated as 0mm: {err}"
@@ -512,10 +475,9 @@ def process_csv(file):
         community = row["community"]
         if pd.isna(community):
             continue
-        key = (community, ts_str)
-        if key in _SEEN_ALERT_KEYS:
+        if db.is_seen_key(community, ts_str):
             continue
-        _SEEN_ALERT_KEYS.add(key)
+        db.add_seen_key(community, ts_str)
 
         level, reasoning = _risk_level(row["rainfall_mm"], row["water_level_m"])
         _raise_alert(ts_str, community, row["rainfall_mm"], row["water_level_m"], level, "", "csv_upload")
@@ -550,7 +512,14 @@ def process_csv(file):
 
     # Persist cleaned rows into the shared database for the dashboard tab
     for _, row in df.iterrows():
-        READINGS.append(row.to_dict())
+        ts_str = str(row["timestamp"])
+        community = row["community"] if pd.notna(row["community"]) else None
+        rainfall_mm = float(row["rainfall_mm"]) if pd.notna(row["rainfall_mm"]) else None
+        water_level_m = float(row["water_level_m"]) if pd.notna(row["water_level_m"]) else None
+        db.add_reading(
+            ts_str, community, rainfall_mm, water_level_m,
+            row["data_quality_flag"], bool(row["flood_event_flag"]),
+        )
 
     display_df = df.copy()
     display_df["timestamp"] = display_df["timestamp"].astype(str)
@@ -583,9 +552,10 @@ def load_sample_data():
 
 
 def _dashboard_table():
-    if not READINGS:
+    rows = db.get_readings()
+    if not rows:
         return pd.DataFrame(columns=["timestamp", "community", "rainfall_mm", "water_level_m", "data_quality_flag", "flood_event_flag"])
-    df = pd.DataFrame(READINGS)
+    df = pd.DataFrame(rows)
     df = df.sort_values(by="flood_event_flag", ascending=False)
     df["timestamp"] = df["timestamp"].astype(str)
     return df[["timestamp", "community", "rainfall_mm", "water_level_m", "data_quality_flag", "flood_event_flag"]]
