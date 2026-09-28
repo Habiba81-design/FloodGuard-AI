@@ -2,8 +2,8 @@
 FloodGuard AI prototype pipeline.
 Raw source upload, then real cleaning and missing data analysis, then
 threshold and flood event detection, then risk classification, then a live
-community risk dashboard with automatic 24 hour checks and real bulk
-outbound alerts, all in one Gradio app.
+community risk dashboard with automatic forward-looking forecast checks and
+real bulk outbound alerts, all in one Gradio app.
 
 Run locally:
     pip install -r requirements.txt
@@ -28,9 +28,9 @@ Outbound alerts (optional, only active once configured):
     just logged instead of actually sent.
 
 Important limitation on Render's free tier: a free Web Service spins down
-after about 15 minutes with no incoming visits, which pauses the 24 hour
+after about 15 minutes with no incoming visits, which pauses the 6 hour
 background check along with everything else, and it only resumes on the
-next visit to the site. For a guaranteed every-24-hours check regardless of
+next visit to the site. For a guaranteed check regardless of
 traffic, either upgrade to an always-on paid instance, or use a free
 uptime service (such as UptimeRobot) to ping the site every few minutes to
 keep it awake.
@@ -291,25 +291,106 @@ _LEVEL_PLAIN = {
 }
 
 
-def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning):
-    headline, advice = _LEVEL_PLAIN.get(level, ("", ""))
-    rainfall_txt = f"{rainfall_mm:.0f}mm" if rainfall_mm is not None else "not available"
+_LEVEL_PLAIN = {
+    "CRITICAL": {
+        "headline": "Flooding is very likely within hours.",
+        "meaning": "It means the water level and rainfall together have crossed normal threshold so flooding is very possible.",
+        "steps": [
+            "If you live in a low-lying area or near the river, move yourself and your family to higher ground now.",
+            "Do not walk or drive through flood water, even if it looks shallow. Moving water can be much stronger and deeper than it appears.",
+            "Keep your phone charged and switch on, so you can receive further updates.",
+            "Check on elderly, disabled, or sick neighbours who may need help moving.",
+            "Follow any instructions given by NADMO or local authorities, even if they differ from this message.",
+        ],
+    },
+    "HIGH": {
+        "headline": "There is a serious risk of flooding in the next day or so.",
+        "meaning": "This means conditions are close to the levels that have caused flooding before. It is not certain flooding will happen, but you should prepare as if it might.",
+        "steps": [
+            "Move valuables, important documents, and anything hard to replace to a higher shelf or upper floor.",
+            "Check that you have a torch, some cash, and any medicines you need, in case you have to leave quickly.",
+            "Check on elderly or disabled neighbours and agree on a plan with them.",
+            "Avoid low-lying roads, especially after dark, until the risk passes.",
+            "Stay ready to move to higher ground if conditions get worse.",
+        ],
+    },
+    "MODERATE": {
+        "headline": "Water levels or rainfall are above normal, but not yet dangerous.",
+        "meaning": "This is a heads-up, not an emergency. Conditions are worth watching, but they have not reached levels that have caused flooding before.",
+        "steps": [
+            "Keep an eye on the weather over the next day.",
+            "Avoid driving or walking through low-lying roads shortly after heavy rain.",
+            "No need to move belongings or evacuate at this stage.",
+        ],
+    },
+    "LOW": {
+        "headline": "No unusual flood risk detected right now.",
+        "meaning": "Rainfall and water levels are within their normal range for your area.",
+        "steps": [
+            "No action is needed.",
+            "You are only receiving this message because it was sent as part of a test.",
+        ],
+    },
+}
+
+
+def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
+                              forecast=False, window_start=None, window_end=None):
+    info = _LEVEL_PLAIN.get(level, {"headline": "", "meaning": "", "steps": []})
+    rainfall_txt = f"{rainfall_mm:.0f} millimetres" if rainfall_mm is not None else "not available"
     water_txt = f"{water_level_m:.1f} metres" if water_level_m is not None else "not available"
+
+    if forecast:
+        if window_start:
+            when_txt = f"between {window_start} and {window_end}" if window_end and window_end != window_start else f"around {window_start}"
+            measured_para = (
+                f"What we expect: heavy rain is forecast {when_txt}. Over the "
+                f"whole of the next 24 hours, the total rainfall is expected "
+                f"to be about {rainfall_txt}. Right now, the river or water "
+                f"level being tracked for {community} is {water_txt}."
+            )
+        else:
+            measured_para = (
+                f"What we expect: rainfall over the next 24 hours is forecast "
+                f"to be about {rainfall_txt}. Right now, the river or water "
+                f"level being tracked for {community} is {water_txt}."
+            )
+        lead = "This is an early warning based on the weather forecast.\n\n"
+    else:
+        measured_para = (
+            f"What was reported: rainfall of about {rainfall_txt}, and a "
+            f"river or water level of {water_txt}, for {community}."
+        )
+        lead = ""
+
+    steps_txt = "\n".join(f"{i}. {s}" for i, s in enumerate(info["steps"], start=1))
+
     return (
-        f"FLOOD ALERT for {community}: {level} RISK\n\n"
-        f"{headline}\n\n"
-        f"What we measured: rainfall in the last 24 hours was {rainfall_txt}, "
-        f"and the river/water level was {water_txt}.\n\n"
-        f"What to do: {advice}\n\n"
-        f"Please also follow any guidance from local authorities and NADMO.\n\n"
+        f"FLOOD ALERT for {community}\n"
+        f"Risk level: {level}\n\n"
+        f"{info['headline']}\n\n"
+        f"{lead}"
+        f"{measured_para}\n\n"
+        f"What this means: {info['meaning']}\n\n"
+        f"What to do:\n"
+        f"{steps_txt}\n\n"
+        f"Please also follow any guidance from local authorities and NADMO. "
+        f"If you are unsure what to do, ask a neighbour, a community leader, "
+        f"or call NADMO's emergency line if your area has one.\n\n"
         f"---\n"
-        f"Technical detail: {reasoning}"
+        f"This message was sent automatically by FloodGuard AI. "
+        f"For those who want the numbers behind this alert: {reasoning}"
     )
 
 
-def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_level_m=None):
+def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_level_m=None,
+                        forecast=False, window_start=None, window_end=None):
     """Bulk send a real email/SMS to every contact imported for this
-    community, or for All communities. Returns a short markdown summary."""
+    community, or for All communities. Returns a short markdown summary.
+    forecast=True means the numbers behind this alert are a weather
+    forecast for what's coming, not a report of current conditions, and the
+    message is worded accordingly. window_start/window_end, if known, name
+    the specific hours the heaviest rain is expected."""
     if level not in ("HIGH", "CRITICAL"):
         return ""
 
@@ -322,7 +403,8 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
     if not targets:
         return f"\n\nNo contacts imported for {community} yet, so no outbound alert was sent."
 
-    message = _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning)
+    message = _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
+                                       forecast=forecast, window_start=window_start, window_end=window_end)
 
     sent_email, sent_sms, failed = 0, 0, 0
     reasons = set()
@@ -351,7 +433,7 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
 # Shared risk logic, used by manual entries, CSV uploads, and the scheduled
 # automatic check.
 # ---------------------------------------------------------------------------
-def _risk_level(rainfall_mm, water_level_m, notes=""):
+def _risk_level(rainfall_mm, water_level_m, notes="", rainfall_label="reported"):
     rainfall_mm = float(rainfall_mm or 0)
     water_level_m = float(water_level_m or 0)
     notes_lower = (notes or "").lower()
@@ -369,7 +451,7 @@ def _risk_level(rainfall_mm, water_level_m, notes=""):
 
     reasoning = (
         f"Rule based check: water level {water_level_m}m against a {FLOOD_WATER_THRESHOLD_M}m threshold, "
-        f"rainfall {rainfall_mm}mm per 24h against an {FLOOD_RAINFALL_THRESHOLD_MM}mm threshold"
+        f"{rainfall_label} rainfall {rainfall_mm}mm against an {FLOOD_RAINFALL_THRESHOLD_MM}mm threshold"
         + (f", critical terms detected: {', '.join(hit_terms)}" if hit_terms else "")
         + "."
     )
@@ -389,51 +471,99 @@ def _alerts_table():
 
 # ---------------------------------------------------------------------------
 # Automatic rainfall fetch (Open-Meteo, free, no API key or signup needed)
-# and the 24 hour scheduled check that ties everything together.
+# and the forward-looking forecast check that ties everything together.
 # ---------------------------------------------------------------------------
-def _fetch_rainfall_mm(lat, lon):
-    """Last 24h rainfall total for these coordinates. Returns (value, error);
-    error is None on success, a short string on failure, never raises."""
+def _fetch_forecast_rainfall_mm(lat, lon):
+    """Rainfall FORECAST for the next 24 hours starting from right now, at
+    these coordinates. This looks forward, not backward, so an alert means
+    'this is expected to happen', not 'this already happened'. Also picks
+    out the specific block of hours when the rain is actually expected, so
+    people know *when* to prepare, not just that a wet day is coming.
+    Returns (total_mm, window_start, window_end, error); window_start and
+    window_end are human readable strings like 'Mon 3:00 PM', or None if no
+    meaningful rain is expected in the window. error is None on success, a
+    short string on failure, never raises.
+
+    Ghana (Africa/Accra) has no daylight saving and sits at UTC+0, so the
+    server's own UTC clock lines up with local time here without extra
+    conversion.
+    """
     params = {
         "latitude": lat,
         "longitude": lon,
-        "daily": "precipitation_sum",
-        "past_days": 1,
-        "forecast_days": 1,
+        "hourly": "precipitation",
+        "forecast_days": 3,
         "timezone": "Africa/Accra",
     }
     url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.load(resp)
-        values = data.get("daily", {}).get("precipitation_sum", [])
-        if not values:
-            return None, "No precipitation data returned by the weather API."
-        return float(values[0]), None
+        times = data.get("hourly", {}).get("time", [])
+        values = data.get("hourly", {}).get("precipitation", [])
+        if not times or not values:
+            return None, None, None, "No forecast data returned by the weather API."
+
+        current_hour = datetime.utcnow().strftime("%Y-%m-%dT%H:00")
+        try:
+            start = times.index(current_hour)
+        except ValueError:
+            start = 0  # fall back to the start of the returned forecast
+
+        window_times = times[start:start + 24]
+        window_values = values[start:start + 24]
+        if not window_values:
+            return None, None, None, "Forecast window was empty."
+        total_mm = round(sum(window_values), 1)
+
+        # Find the specific hours when rain is actually expected (>=1mm/h),
+        # so the alert can say *when*, not just *how much*.
+        rain_hour_idxs = [i for i, v in enumerate(window_values) if v is not None and v >= 1.0]
+        window_start_str, window_end_str = None, None
+        if rain_hour_idxs:
+            first_dt = datetime.fromisoformat(window_times[rain_hour_idxs[0]])
+            last_dt = datetime.fromisoformat(window_times[rain_hour_idxs[-1]])
+            window_start_str = first_dt.strftime("%a %-I:%M %p")
+            window_end_str = last_dt.strftime("%a %-I:%M %p")
+
+        return total_mm, window_start_str, window_end_str, None
     except Exception as e:
-        return None, str(e)
+        return None, None, None, str(e)
 
 
 def run_scheduled_check():
-    """Check every monitored community once: fetch rainfall automatically,
-    combine with the last manually reported water level, classify, raise an
-    alert, and dispatch a bulk outbound alert if HIGH or CRITICAL. Used both
-    by the 24 hour background loop and the admin 'Run check now' button."""
+    """Check every monitored community once: fetch a rainfall FORECAST for
+    the next 24 hours, combine with the last manually reported water level,
+    classify, raise an alert, and dispatch a bulk outbound alert if HIGH or
+    CRITICAL. This is the forward-looking early-warning path: it is meant to
+    give people notice before flooding happens, not just confirm it already
+    did. Used both by the background loop and the admin 'Run check now'
+    button."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = []
     latest_water_levels = db.get_water_levels()
     for community, (lat, lon) in COMMUNITY_COORDS.items():
-        rainfall_mm, err = _fetch_rainfall_mm(lat, lon)
+        rainfall_mm, window_start, window_end, err = _fetch_forecast_rainfall_mm(lat, lon)
         water_level_m = latest_water_levels.get(community, 0.0)
-        notes = "Automatic 24h check."
+        notes = "Automatic forecast-based check."
+        if window_start:
+            notes += f" Heaviest rain expected {window_start} to {window_end}."
         if err:
-            notes += f" Rainfall fetch failed, treated as 0mm: {err}"
-        level, reasoning = _risk_level(rainfall_mm or 0, water_level_m, "")
+            notes += f" Forecast fetch failed, treated as 0mm: {err}"
+        level, reasoning = _risk_level(rainfall_mm or 0, water_level_m, "", rainfall_label="forecast (next 24h)")
         _raise_alert(now, community, rainfall_mm or 0, water_level_m, level, notes, "scheduled")
         if level in ("HIGH", "CRITICAL"):
-            _dispatch_outbound(community, level, reasoning, rainfall_mm, water_level_m)
-        rain_display = f"{rainfall_mm}mm" if rainfall_mm is not None else "unavailable"
-        lines.append(f"- **{community}**: rainfall {rain_display}, water level {water_level_m}m -> **{level}**")
+            # Skip re-sending if we already warned about this exact rain
+            # window for this community, so people don't get the same
+            # forecast alert every few hours while it's still pending.
+            dedupe_key = f"forecast:{window_start or 'unknown'}"
+            if not db.is_seen_key(community, dedupe_key):
+                db.add_seen_key(community, dedupe_key)
+                _dispatch_outbound(community, level, reasoning, rainfall_mm, water_level_m,
+                                    forecast=True, window_start=window_start, window_end=window_end)
+        rain_display = f"{rainfall_mm}mm forecast" if rainfall_mm is not None else "unavailable"
+        window_display = f", heaviest rain {window_start}-{window_end}" if window_start else ""
+        lines.append(f"- **{community}**: {rain_display}{window_display}, current water level {water_level_m}m -> **{level}**")
     return "\n".join(lines)
 
 
@@ -451,7 +581,13 @@ def _scheduler_loop():
             run_scheduled_check()
         except Exception:
             pass
-        time_module.sleep(24 * 60 * 60)
+        # Every 6 hours, not 24: the forecast only looks 24h ahead, so a
+        # once-a-day check can miss rain that's due in, say, 20 hours until
+        # the next run. Checking every 6h keeps real lead time within the
+        # 12-24h window instead of drifting with when the loop happens to
+        # wake up. The dedupe key in run_scheduled_check stops the same
+        # rain window from re-sending a fresh alert every 6h.
+        time_module.sleep(6 * 60 * 60)
 
 
 _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
@@ -668,15 +804,18 @@ def classify_risk(community, rainfall_mm, water_level_m, notes):
 with gr.Blocks(title="FloodGuard AI") as demo:
     gr.Markdown(
         "# FloodGuard AI\n"
-        "Automatic early warning for flood-prone communities. Every 24 hours, "
-        "the system fetches current rainfall for each monitored community, "
+        "Automatic early warning for flood-prone communities. Every 6 hours, "
+        "the system checks the rainfall FORECAST for the next 24 hours for each "
+        "monitored community, works out when the heaviest rain is expected, "
         "combines it with the last reported water level, classifies the risk, "
         "and sends a real bulk email/SMS alert to every contact registered "
-        "for that community, no signup required from residents themselves."
+        "for that community, no signup required from residents themselves. "
+        "This is designed to warn people 12-24 hours before rain arrives, not "
+        "just confirm flooding after it's already happening."
     )
 
     with gr.Tab("Community Risk Dashboard"):
-        gr.Markdown("Live view of every alert raised: automatic 24h checks, CSV uploads, and manual field reports, newest first.")
+        gr.Markdown("Live view of every alert raised: automatic forecast checks, CSV uploads, and manual field reports, newest first.")
         refresh_btn = gr.Button("Refresh dashboard")
         readings_dashboard = gr.Dataframe(label="Cleaned CSV readings", value=_dashboard_table)
         alerts_dashboard = gr.Dataframe(label="Alerts raised (all sources)", value=_alerts_table)
@@ -721,7 +860,7 @@ with gr.Blocks(title="FloodGuard AI") as demo:
             "in Render's Environment tab. This is where whoever is in charge imports each "
             "community's contact list in bulk (so residents never need to sign up "
             "themselves) and keeps the current water level up to date for the automatic "
-            "24 hour check."
+            "forecast-based check."
         )
         admin_password = gr.Textbox(label="Admin password", type="password")
 
@@ -748,9 +887,12 @@ with gr.Blocks(title="FloodGuard AI") as demo:
         wl_btn.click(update_water_level, inputs=[admin_password, wl_community, wl_level], outputs=[wl_out, wl_table])
 
         gr.Markdown(
-            "### Run the automatic check now\n"
-            "Normally runs every 24 hours by itself. Use this to run it immediately, "
-            "for testing or a demo."
+            "### Run the automatic forecast check now\n"
+            "Normally runs every 6 hours by itself, so real lead time stays "
+            "within about 12-24 hours before rain arrives. It looks at the rainfall "
+            "**forecast for the next 24 hours**, works out the specific hours "
+            "heavy rain is expected, and warns people before flooding happens, "
+            "not after. Use this button to run it immediately, for testing or a demo."
         )
         run_now_btn = gr.Button("Run check now", variant="primary")
         run_now_out = gr.Markdown()
