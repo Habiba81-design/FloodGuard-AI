@@ -182,7 +182,44 @@ def update_water_level(password, community, level):
 # or the send fails, they return (False, reason) instead of raising, so a
 # missing SMTP or Twilio setup never crashes the app.
 # ---------------------------------------------------------------------------
+def _send_email_brevo(to_email, subject, body):
+    """Send via Brevo's HTTPS API. Works on Render's free tier, which blocks
+    SMTP ports. Needs BREVO_API_KEY and ALERT_FROM_EMAIL (a sender you have
+    verified in Brevo)."""
+    api_key = os.environ.get("BREVO_API_KEY")
+    from_email = os.environ.get("ALERT_FROM_EMAIL")
+    if not api_key or not from_email:
+        return False, "Brevo not configured (missing BREVO_API_KEY / ALERT_FROM_EMAIL)."
+    payload = json.dumps({
+        "sender": {"name": "FloodGuard AI", "email": from_email},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "textContent": body,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=payload,
+        headers={"api-key": api_key, "content-type": "application/json", "accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return (True, "sent") if resp.status in (200, 201, 202) else (False, f"Brevo returned {resp.status}")
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:200]
+        except Exception:
+            detail = ""
+        return False, f"Brevo error {e.code}: {detail}"
+    except Exception as e:
+        return False, str(e)
+
+
 def _send_email(to_email, subject, body):
+    # Prefer the HTTPS API (works on Render free tier); fall back to SMTP.
+    if os.environ.get("BREVO_API_KEY"):
+        return _send_email_brevo(to_email, subject, body)
+
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER")
@@ -190,7 +227,7 @@ def _send_email(to_email, subject, body):
     from_email = os.environ.get("ALERT_FROM_EMAIL", user)
 
     if not user or not password:
-        return False, "Email not configured (missing SMTP_USER / SMTP_PASSWORD)."
+        return False, "Email not configured (missing BREVO_API_KEY, or SMTP_USER / SMTP_PASSWORD)."
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -249,19 +286,24 @@ def _dispatch_outbound(community, level, reasoning):
     )
 
     sent_email, sent_sms, failed = 0, 0, 0
+    reasons = set()
     for s in targets:
         if s.get("email"):
-            ok, _ = _send_email(s["email"], f"FloodGuard AI: {level} flood risk in {community}", message)
+            ok, why = _send_email(s["email"], f"FloodGuard AI: {level} flood risk in {community}", message)
             sent_email += 1 if ok else 0
             failed += 0 if ok else 1
+            if not ok:
+                reasons.add(f"email: {why}")
         if s.get("phone"):
-            ok, _ = _send_sms(s["phone"], message)
+            ok, why = _send_sms(s["phone"], message)
             sent_sms += 1 if ok else 0
             failed += 0 if ok else 1
+            if not ok:
+                reasons.add(f"SMS: {why}")
 
     summary = f"\n\n**Bulk outbound alert:** {sent_email} email(s) and {sent_sms} SMS sent to contacts in {community}."
     if failed:
-        summary += f" {failed} delivery attempt(s) failed, check SMTP/Twilio credentials in Render's Environment tab."
+        summary += f" {failed} delivery attempt(s) failed. Reason(s): " + "; ".join(sorted(reasons))
     return summary
 
 
