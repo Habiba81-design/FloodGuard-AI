@@ -265,7 +265,49 @@ def _send_sms(to_phone, body):
         return False, str(e)
 
 
-def _dispatch_outbound(community, level, reasoning):
+_LEVEL_PLAIN = {
+    "CRITICAL": (
+        "Flooding is happening now or is very likely within hours.",
+        "Move to higher ground immediately if you are in a low-lying area. "
+        "Avoid walking or driving through flood water. Keep phones charged "
+        "and follow any instructions from NADMO or local authorities.",
+    ),
+    "HIGH": (
+        "There is a serious risk of flooding in the next day or so.",
+        "Prepare now: move valuables and important documents to higher "
+        "ground, check on elderly or disabled neighbours, and stay ready "
+        "to move if conditions worsen.",
+    ),
+    "MODERATE": (
+        "Water levels or rainfall are above normal, but not yet dangerous.",
+        "Keep an eye on the weather and avoid low-lying roads after heavy "
+        "rain. No need to evacuate at this stage.",
+    ),
+    "LOW": (
+        "No unusual flood risk detected right now.",
+        "No action needed. This message is only sent for HIGH or CRITICAL "
+        "risk, so you are seeing this as part of a test.",
+    ),
+}
+
+
+def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning):
+    headline, advice = _LEVEL_PLAIN.get(level, ("", ""))
+    rainfall_txt = f"{rainfall_mm:.0f}mm" if rainfall_mm is not None else "not available"
+    water_txt = f"{water_level_m:.1f} metres" if water_level_m is not None else "not available"
+    return (
+        f"FLOOD ALERT for {community}: {level} RISK\n\n"
+        f"{headline}\n\n"
+        f"What we measured: rainfall in the last 24 hours was {rainfall_txt}, "
+        f"and the river/water level was {water_txt}.\n\n"
+        f"What to do: {advice}\n\n"
+        f"Please also follow any guidance from local authorities and NADMO.\n\n"
+        f"---\n"
+        f"Technical detail: {reasoning}"
+    )
+
+
+def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_level_m=None):
     """Bulk send a real email/SMS to every contact imported for this
     community, or for All communities. Returns a short markdown summary."""
     if level not in ("HIGH", "CRITICAL"):
@@ -280,16 +322,14 @@ def _dispatch_outbound(community, level, reasoning):
     if not targets:
         return f"\n\nNo contacts imported for {community} yet, so no outbound alert was sent."
 
-    message = (
-        f"FloodGuard AI alert: {level} flood risk reported for {community}. {reasoning} "
-        f"Please follow guidance from local authorities and NADMO."
-    )
+    message = _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning)
 
     sent_email, sent_sms, failed = 0, 0, 0
     reasons = set()
     for s in targets:
         if s.get("email"):
-            ok, why = _send_email(s["email"], f"FloodGuard AI: {level} flood risk in {community}", message)
+            subject = f"⚠️ Flood Alert: {level} risk in {community}" if level in ("HIGH", "CRITICAL") else f"Flood update: {community}"
+            ok, why = _send_email(s["email"], subject, message)
             sent_email += 1 if ok else 0
             failed += 0 if ok else 1
             if not ok:
@@ -391,7 +431,7 @@ def run_scheduled_check():
         level, reasoning = _risk_level(rainfall_mm or 0, water_level_m, "")
         _raise_alert(now, community, rainfall_mm or 0, water_level_m, level, notes, "scheduled")
         if level in ("HIGH", "CRITICAL"):
-            _dispatch_outbound(community, level, reasoning)
+            _dispatch_outbound(community, level, reasoning, rainfall_mm, water_level_m)
         rain_display = f"{rainfall_mm}mm" if rainfall_mm is not None else "unavailable"
         lines.append(f"- **{community}**: rainfall {rain_display}, water level {water_level_m}m -> **{level}**")
     return "\n".join(lines)
@@ -525,7 +565,7 @@ def process_csv(file):
         _raise_alert(ts_str, community, row["rainfall_mm"], row["water_level_m"], level, "", "csv_upload")
         n_new_alerts += 1
         if level in ("HIGH", "CRITICAL"):
-            summary = _dispatch_outbound(community, level, reasoning)
+            summary = _dispatch_outbound(community, level, reasoning, row["rainfall_mm"], row["water_level_m"])
             if "email(s)" in summary:
                 n_notified += 1
 
@@ -617,7 +657,7 @@ def classify_risk(community, rainfall_mm, water_level_m, notes):
     time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     _raise_alert(time_str, community, float(rainfall_mm or 0), float(water_level_m or 0), level, notes, "manual")
 
-    alert_summary = _dispatch_outbound(community, level, reasoning)
+    alert_summary = _dispatch_outbound(community, level, reasoning, float(rainfall_mm or 0), float(water_level_m or 0))
 
     return f"### Risk level: {level}\n\n{reasoning}{alert_summary}"
 
