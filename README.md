@@ -1,80 +1,90 @@
-# FloodGuard AI — Phase 1 Working Pipeline
+# FloodGuard AI
 
-A working pipeline for the hackathon build: real CSV data cleaning, threshold-based
-flood-event detection, and field-scenario risk classification, all in one Gradio app.
+An automatic flood warning system for flood prone communities in Ghana. It checks the weather forecast ahead of time and warns people 12 to 24 hours before flooding happens, instead of only confirming it after it has started.
 
-## How it maps to the proposal
+## Why forecast-based, not reactive
 
-| Proposal section | Code |
+Most flood reporting tools (including an earlier version of this one) work backward: someone reports water is rising, or a sensor detects it, and the system reacts. That gives people little or no time to prepare. This system instead pulls a rainfall **forecast** for the next 24 hours, so a warning can go out before the rain has even started, which is the whole point of an early-warning system.
+
+## Architecture
+
+```
+Open-Meteo Forecast API  ──┐
+Open-Meteo Flood API    ──┼──▶  run_scheduled_check()  ──▶  Postgres (Supabase)
+Open-Meteo Geocoding API──┘            │                          │
+                                        ▼                          ▼
+                                  risk classification      Dashboard / Admin UI
+                                        │
+                                        ▼
+                                Brevo (email) / Twilio (SMS)
+```
+
+- **Gradio** — the web UI and app server, deployed on Render's free tier.
+- **Postgres (Supabase)** — persists readings, alerts, contacts, and water levels across restarts. Render's own filesystem is wiped on every redeploy, so nothing can be stored locally.
+- **Open-Meteo Forecast API** — free, no API key, gives rainfall forecast for any coordinates.
+- **Open-Meteo Flood API (GloFAS)** — free, no API key, gives modelled river discharge for rivers worldwide. Used as the automatic water-level signal.
+- **Open-Meteo Geocoding API** — free, no API key, turns a typed place name into coordinates for the "Check My Area" feature.
+- **Brevo** — sends real outbound email over HTTPS. Chosen specifically because Render's free tier blocks outbound SMTP (ports 25/465/587) as of September 2025, which silently breaks Gmail SMTP sending.
+- **Twilio** — optional SMS sending, not required for the system to work.
+
+## Why river discharge instead of a real water-level sensor
+
+There is no public network of river gauges in Ghana reporting a live depth in metres. What does exist, freely, is GloFAS — a global hydrological model that estimates river discharge (in cubic metres per second) for modelled rivers worldwide, including the Volta system.
+
+This system compares today's discharge to that river's own recent 60-day median, and scales the ratio onto the same metres scale already used for the flood threshold:
+
+- normal flow (ratio 1.0) → scaled to half the threshold
+- double normal flow (ratio 2.0) → scaled to exactly the threshold
+
+This is an approximation, not a real depth reading, and the code says so directly in its own comments. For communities with no modelled river nearby (e.g. New Legon, which floods from drainage, not a river), the system honestly falls back to 0 rather than inventing a number.
+
+## Risk classification
+
+Risk is a simple, transparent rule-based check, not a black-box model — deliberately, since a safety-critical alert needs to be explainable to the people receiving it:
+
+- `FLOOD_RAINFALL_THRESHOLD_MM` and `FLOOD_WATER_THRESHOLD_M` define the baseline HIGH/CRITICAL cutoffs.
+- Either signal alone, if extreme enough (roughly 1.25x the threshold), can push a community straight to CRITICAL, even if the other signal is low — this matters because the two known real-world flood mechanisms in these communities (extreme rainfall vs. a dam-driven discharge spike) don't always show up in both signals at once.
+
+## Known limitations, stated honestly
+
+- **Render's free tier spins down after ~15 minutes idle**, pausing the background check until the next visit. This is disclosed in the app itself rather than hidden.
+- **A single shared admin password**, compared with `secrets.compare_digest` to avoid timing attacks, but still not per-user authentication. Fine for a small team, not enterprise-grade.
+- **GloFAS discharge is a proxy, not a real sensor.** It is disclosed as such everywhere it's used, including in the alert email itself.
+- **Thresholds are not yet calibrated per community.** They were set from general Volta-region reporting, not a rigorous statistical fit. The backtest tool (see below) is the first real step toward validating them against actual outcomes rather than assuming they are correct.
+
+## Validating accuracy: the backtest tool
+
+Rather than claim an accuracy number with no evidence behind it, the Admin tab includes a real backtest against two confirmed, recent flood events near New Legon, run through the exact same classification logic the live app uses:
+
+1. **18 May 2025, Accra** — NADMO-confirmed: 5 deaths, over 3,000 people displaced, after around four hours of heavy rain. Affected Adenta, Kaneshie, Okponglo and East Legon Hills, right around New Legon.
+2. **29 June 2026, Accra** — the most recent major flooding in Ghana at the time this was written, killing at least 10–12 people and overwhelming drainage across Adenta, Madina, Achimota and East Legon.
+
+Both events are rainfall-driven with no river involved, so together they specifically test whether rainfall alone correctly triggers a warning for a drainage-only location, across two separate real storms a year apart. For each event, it pulls actual historical rainfall for the real dates, and reports how many days during that known flood the system would have correctly flagged HIGH/CRITICAL risk.
+
+This only works once deployed (it calls live external APIs), and is designed to be extended with more known events over time as a genuine, growing evidence base for the system's accuracy.
+
+## Features
+
+1. **Location-based risk check** ("Check My Area" tab) — anyone can check flood risk for any place name, not just the five pre-registered communities, using live geocoding plus the same forecast and discharge logic.
+2. **Forecast-based prediction** — uses the rainfall forecast, not past data, so warnings come before the rain, not after.
+3. **Automatic alerts** — real email (and SMS, if Twilio is configured) sent 12–24 hours before heavy rain, in plain language with concrete steps.
+4. **Risk levels** — LOW, MODERATE, HIGH, CRITICAL, from forecast rainfall combined with automatic (or manual fallback) water level.
+5. **Community contact lists** — bulk CSV import per community, so residents never need to sign up themselves.
+
+## Setup
+
+Required environment variables (Render → Environment tab):
+
+| Variable | Purpose |
 |---|---|
-| Data acquisition & integration (Sec. 6) | `process_csv()`, flexible column matching across source formats |
-| Data cleaning (Sec. 6) | `process_csv()`, type coercion, outlier/duplicate/missing-value flags |
-| Exploratory analysis / thresholds (Sec. 6, 10) | `FLOOD_WATER_THRESHOLD_M`, `FLOOD_RAINFALL_THRESHOLD_MM`, flood-event flagging |
-| Success metric: <10% missing data (Sec. 10) | Missing-data-by-field report in the "Data Pipeline" tab |
-| Advance warning / risk signal (Sec. 5) | `classify_risk()`, rule-based by default, Claude-enhanced if a key is set |
-| Community risk view | "Community Risk Dashboard" tab, live table of readings + alerts |
+| `ADMIN_PASSWORD` | Gates every admin action |
+| `DATABASE_URL` | Postgres connection string (Supabase) |
+| `BREVO_API_KEY` | Sends real alert emails over HTTPS |
+| `ALERT_FROM_EMAIL` | Sender address, verified in Brevo |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` | Optional, for SMS |
 
-## Run it locally
+## What's next
 
-```bash
-pip install -r requirements.txt
-python app.py
-```
-
-This opens a local web UI (usually at `http://127.0.0.1:7860`).
-
-## Deploy on Render (Web Service — this needs a running Python process, not a Static Site)
-
-1. Push this folder to a GitHub repo.
-2. On Render: **New → Web Service**, connect the repo.
-3. Settings:
-   - **Runtime:** Python 3
-   - **Build command:** `pip install -r requirements.txt`
-   - **Start command:** `python app.py`
-4. (Optional) Add an environment variable `ANTHROPIC_API_KEY` if you want
-   Claude-enhanced classification context instead of the rule-based-only output.
-5. Deploy — Render gives you a public URL, this is what you'd show judges.
-
-Render sets a `PORT` environment variable automatically; `app.py` reads it, so no
-extra config is needed there.
-
-## Deploy to a Hugging Face Space (alternative)
-
-1. Go to huggingface.co, create a new **Space**, choose the **Gradio** SDK.
-2. Upload `app.py` and `requirements.txt`.
-3. (Optional) Add `ANTHROPIC_API_KEY` as a repository secret.
-4. The Space builds automatically and gives you a public URL.
-
-## Using it without an API key
-
-The app works fully without any API key — `classify_risk()` falls back to a
-transparent, threshold-derived rule-based classifier (checks rainfall and water
-level against Phase 1's flood thresholds, and scans field notes for critical terms
-like "trapped" or "rising fast"). This is a legitimate design choice to mention in
-your pitch: traceable logic instead of a black box, in a context where lives are
-at stake.
-
-If you do want Claude-enhanced output (a plain-language sentence a responder could
-act on, layered on top of the rule-based level), set the environment variable
-before running:
-
-```bash
-export ANTHROPIC_API_KEY=your_key_here
-python app.py
-```
-
-## Testing without a real CSV
-
-Click **"Load sample data instead"** in the Data Pipeline tab — it loads a small
-illustrative dataset (deliberately includes a missing value, a duplicate row, and
-an outlier) so you can see the cleaning logic actually catch each one live.
-
-## Known limitations to mention in the demo
-
-- The in-memory store (`READINGS`, `ALERTS`) resets every time the app restarts —
-  fine for a demo, swap in Firebase/Supabase/Airtable for anything persistent.
-- Column matching handles common header variants but isn't exhaustive; if your CSV
-  isn't recognized, the report tells you which canonical fields it couldn't map.
-- Thresholds (3.2m water level, 80mm/24h rainfall) are illustrative starting points
-  from the proposal's exploratory-analysis goals, not yet validated per community —
-  that validation is Phase 1's actual Section 6/10 deliverable.
+- Calibrate thresholds per community using more real historical events, once the backtest tool has been run against several.
+- Redesign the interface further beyond the current Gradio theme (color-coded risk badges, distinct typography) toward a fully custom layout.
+- Explore real partnerships with VRA or the Water Resources Commission for genuine gauge data, to replace the GloFAS proxy where possible.
