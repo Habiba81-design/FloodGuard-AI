@@ -440,7 +440,18 @@ def _risk_level(rainfall_mm, water_level_m, notes="", rainfall_label="reported")
 
     hit_terms = [t for t in CRITICAL_TERMS if t in notes_lower]
 
-    if hit_terms or (water_level_m >= FLOOD_WATER_THRESHOLD_M and rainfall_mm >= FLOOD_RAINFALL_THRESHOLD_MM):
+    # CRITICAL is reached either by the combined signal (both water level and
+    # rainfall crossing their threshold together), or by either signal alone
+    # being extreme enough on its own. This second path matters for
+    # communities with no real water level sensor (water level stuck at 0,
+    # e.g. New Legon, where flooding is drainage-driven, not river-driven):
+    # without it, rainfall alone could never classify as CRITICAL, only HIGH,
+    # no matter how extreme the forecast rain was.
+    combined_critical = water_level_m >= FLOOD_WATER_THRESHOLD_M and rainfall_mm >= FLOOD_RAINFALL_THRESHOLD_MM
+    rainfall_alone_critical = rainfall_mm >= FLOOD_RAINFALL_THRESHOLD_MM * 1.25
+    water_alone_critical = water_level_m >= FLOOD_WATER_THRESHOLD_M * 1.25
+
+    if hit_terms or combined_critical or rainfall_alone_critical or water_alone_critical:
         level = "CRITICAL"
     elif water_level_m >= FLOOD_WATER_THRESHOLD_M * 0.8 or rainfall_mm >= FLOOD_RAINFALL_THRESHOLD_MM * 0.65:
         level = "HIGH"
@@ -595,180 +606,8 @@ _scheduler_thread.start()
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Data acquisition and integration (CSV upload, flexible column matching)
+# Dashboard: readings and alerts raised by the automatic forecast check.
 # ---------------------------------------------------------------------------
-def _match_columns(df):
-    """Map whatever headers the uploaded CSV has onto our canonical schema."""
-    lower_cols = {c.lower().strip(): c for c in df.columns}
-    mapping = {}
-    for canonical, aliases in COLUMN_ALIASES.items():
-        for alias in aliases:
-            if alias in lower_cols:
-                mapping[lower_cols[alias]] = canonical
-                break
-    return mapping
-
-
-def process_csv(file):
-    """`file` is a filepath string, as returned by gr.File(type="filepath")."""
-    if file is None:
-        return (
-            "Upload a CSV to run the pipeline, or click Load sample data below.",
-            None, None,
-        )
-
-    try:
-        raw = pd.read_csv(file)
-    except Exception as e:
-        return (f"Could not read the file as CSV: {e}", None, None)
-
-    mapping = _match_columns(raw)
-    missing_required = [c for c in COLUMN_ALIASES if c not in mapping.values()]
-    df = raw.rename(columns=mapping)
-
-    for col in COLUMN_ALIASES:
-        if col not in df.columns:
-            df[col] = pd.NA
-
-    df = df[["timestamp", "community", "rainfall_mm", "water_level_m"]].copy()
-
-    # Real cleaning
-    df["community"] = df["community"].astype(str).str.strip()
-    df["community"] = df["community"].replace({"nan": pd.NA, "": pd.NA})
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", dayfirst=True)
-    df["rainfall_mm"] = (
-        df["rainfall_mm"].astype(str).str.extract(r"([\d.]+)")[0].astype(float)
-    )
-    df["water_level_m"] = (
-        df["water_level_m"].astype(str).str.extract(r"([\d.]+)")[0].astype(float)
-    )
-
-    # Outlier flags (physically implausible values for this domain)
-    df["outlier_flag"] = (
-        (df["rainfall_mm"] > 500) | (df["rainfall_mm"] < 0)
-        | (df["water_level_m"] > 15) | (df["water_level_m"] < 0)
-    )
-
-    # Duplicate detection (same community and timestamp)
-    df["duplicate_flag"] = df.duplicated(subset=["community", "timestamp"], keep="first")
-
-    # Flood event detection against Phase 1 thresholds
-    df["flood_event_flag"] = (
-        (df["water_level_m"] >= FLOOD_WATER_THRESHOLD_M)
-        | (df["rainfall_mm"] >= FLOOD_RAINFALL_THRESHOLD_MM)
-    )
-
-    def quality_flag(row):
-        if row["outlier_flag"]:
-            return "outlier"
-        if row["duplicate_flag"]:
-            return "duplicate"
-        if pd.isna(row["water_level_m"]) or pd.isna(row["rainfall_mm"]) or pd.isna(row["community"]):
-            return "missing_field"
-        return "clean"
-
-    df["data_quality_flag"] = df.apply(quality_flag, axis=1)
-
-    # Missing data report (the Section 10 success metric)
-    n = len(df)
-    missing_pct = {
-        col: round(100 * df[col].isna().mean(), 1)
-        for col in ["timestamp", "community", "rainfall_mm", "water_level_m"]
-    }
-    missing_df = pd.DataFrame(
-        {"field": list(missing_pct.keys()), "missing_pct": list(missing_pct.values())}
-    )
-    avg_missing = round(sum(missing_pct.values()) / len(missing_pct), 1)
-
-    n_outliers = int(df["outlier_flag"].sum())
-    n_dupes = int(df["duplicate_flag"].sum())
-    n_flood_events = int(df["flood_event_flag"].sum())
-
-    # Automatically raise and dispatch outbound alerts for rows that cross
-    # a threshold, skipping rows already alerted (same community + timestamp)
-    # so re-uploading the same file does not resend the same alert.
-    n_new_alerts, n_notified = 0, 0
-    for _, row in df[df["flood_event_flag"]].iterrows():
-        ts_str = str(row["timestamp"])
-        community = row["community"]
-        if pd.isna(community):
-            continue
-        if db.is_seen_key(community, ts_str):
-            continue
-        db.add_seen_key(community, ts_str)
-
-        level, reasoning = _risk_level(row["rainfall_mm"], row["water_level_m"])
-        _raise_alert(ts_str, community, row["rainfall_mm"], row["water_level_m"], level, "", "csv_upload")
-        n_new_alerts += 1
-        if level in ("HIGH", "CRITICAL"):
-            summary = _dispatch_outbound(community, level, reasoning, row["rainfall_mm"], row["water_level_m"])
-            if "email(s)" in summary:
-                n_notified += 1
-
-    status_lines = [
-        f"**Rows processed:** {n}",
-        f"**Average missing data across key fields:** {avg_missing}% "
-        f"({'under' if avg_missing < 10 else 'over'} the 10% Phase 1 target)",
-        f"**Outliers flagged:** {n_outliers}",
-        f"**Duplicate readings flagged:** {n_dupes}",
-        f"**Flood threshold crossings detected:** {n_flood_events} "
-        f"(water level at least {FLOOD_WATER_THRESHOLD_M}m, or rainfall at least {FLOOD_RAINFALL_THRESHOLD_MM}mm per 24h)",
-    ]
-    if n_new_alerts:
-        status_lines.append(
-            f"**New alerts raised from this upload:** {n_new_alerts} "
-            f"(bulk outbound alerts dispatched for {n_notified} of these, where contacts exist)."
-        )
-    if missing_required:
-        status_lines.append(
-            "Could not confidently find a column for: "
-            + ", ".join(missing_required)
-            + ". Rename your CSV headers to include one of: "
-            + "; ".join(f"{k} ({'/'.join(v)})" for k, v in COLUMN_ALIASES.items() if k in missing_required)
-        )
-    report_md = "\n\n".join(status_lines)
-
-    # Persist cleaned rows into the shared database for the dashboard tab
-    for _, row in df.iterrows():
-        ts_str = str(row["timestamp"])
-        community = row["community"] if pd.notna(row["community"]) else None
-        rainfall_mm = float(row["rainfall_mm"]) if pd.notna(row["rainfall_mm"]) else None
-        water_level_m = float(row["water_level_m"]) if pd.notna(row["water_level_m"]) else None
-        db.add_reading(
-            ts_str, community, rainfall_mm, water_level_m,
-            row["data_quality_flag"], bool(row["flood_event_flag"]),
-        )
-
-    display_df = df.copy()
-    display_df["timestamp"] = display_df["timestamp"].astype(str)
-
-    return report_md, display_df, missing_df
-
-
-def load_sample_data():
-    """Illustrative multi source CSV a hackathon judge can click to try instantly."""
-    sample_text = (
-        "date,community,rainfall,water_level\n"
-        "24/06/2026,Alajo,20mm,1.8\n"
-        "25/06/2026,Alajo,35mm,2.1\n"
-        "26/06/2026,Alajo,55mm,2.6\n"
-        "27/06/2026,Alajo,78mm,3.0\n"
-        "28/06/2026,Alajo,95mm,3.6\n"
-        "29/06/2026,Alajo,110mm,N/A\n"
-        "28/06/2026,Mepe,88mm,\n"
-        "29/06/2026,Mepe,120mm,4.4\n"
-        "25/06/2026,Anloga,35mm,2.1\n"
-        "29/06/2026,Anloga,,3.9\n"
-        "29/06/2026,Anloga,120mm,3.9\n"  # duplicate on purpose
-        "30/06/2026,Sokpoe,999mm,2.0\n"  # outlier on purpose
-    )
-    path = "/tmp/floodguard_sample.csv"
-    with open(path, "w") as f:
-        f.write(sample_text)
-
-    return process_csv(path)
-
-
 def _dashboard_table():
     rows = db.get_readings()
     if not rows:
@@ -780,91 +619,38 @@ def _dashboard_table():
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Risk classification, rule based and fully transparent. Used for a
-# one-off field report (a resident or reporter describing a live scenario),
-# separate from the automatic 24h check above.
-# ---------------------------------------------------------------------------
-def classify_risk(community, rainfall_mm, water_level_m, notes):
-    if not community:
-        return "Enter a community name to classify."
-
-    level, reasoning = _risk_level(rainfall_mm, water_level_m, notes)
-
-    time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    _raise_alert(time_str, community, float(rainfall_mm or 0), float(water_level_m or 0), level, notes, "manual")
-
-    alert_summary = _dispatch_outbound(community, level, reasoning, float(rainfall_mm or 0), float(water_level_m or 0))
-
-    return f"### Risk level: {level}\n\n{reasoning}{alert_summary}"
-
-
-# ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 with gr.Blocks(title="FloodGuard AI") as demo:
     gr.Markdown(
         "# FloodGuard AI\n"
-        "Automatic early warning for flood-prone communities. Every 6 hours, "
-        "the system checks the rainfall FORECAST for the next 24 hours for each "
-        "monitored community, works out when the heaviest rain is expected, "
-        "combines it with the last reported water level, classifies the risk, "
-        "and sends a real bulk email/SMS alert to every contact registered "
-        "for that community, no signup required from residents themselves. "
-        "This is designed to warn people 12-24 hours before rain arrives, not "
-        "just confirm flooding after it's already happening."
+        "An automatic flood warning system for flood prone communities in Ghana. "
+        "It looks at the weather forecast and warns people 12 to 24 hours before "
+        "flooding happens, so they have time to prepare instead of finding out "
+        "after the flood has already started."
     )
 
     with gr.Tab("Community Risk Dashboard"):
-        gr.Markdown("Live view of every alert raised: automatic forecast checks, CSV uploads, and manual field reports, newest first.")
+        gr.Markdown(
+            "Forecast based prediction: every 6 hours the system checks the rainfall "
+            "forecast for each community, works out the risk level, and shows it below. "
+            "Automatic alerts are sent by email/SMS whenever a community reaches "
+            "HIGH or CRITICAL risk."
+        )
         refresh_btn = gr.Button("Refresh dashboard")
-        readings_dashboard = gr.Dataframe(label="Cleaned CSV readings", value=_dashboard_table)
-        alerts_dashboard = gr.Dataframe(label="Alerts raised (all sources)", value=_alerts_table)
+        readings_dashboard = gr.Dataframe(label="Risk readings per community", value=_dashboard_table)
+        alerts_dashboard = gr.Dataframe(label="Alerts sent", value=_alerts_table)
         refresh_btn.click(lambda: (_dashboard_table(), _alerts_table()), outputs=[readings_dashboard, alerts_dashboard])
-
-    with gr.Tab("Field Report"):
-        gr.Markdown(
-            "For a one-off live report, the way a community reporter or sensor feed would send it. "
-            "Classification is rule based and transparent. A HIGH or CRITICAL result here also "
-            "triggers a real bulk outbound alert to that community's contact list."
-        )
-        with gr.Row():
-            comm_in = gr.Textbox(label="Community", placeholder="e.g. Mepe")
-            rain_in = gr.Number(label="Rainfall, last 24h (mm)", value=0)
-            level_in = gr.Number(label="Water level (m)", value=0)
-        notes_in = gr.Textbox(label="Field notes (optional)", placeholder="e.g. river rising fast near the market")
-        classify_btn = gr.Button("Classify", variant="primary")
-        risk_out = gr.Markdown()
-        classify_btn.click(classify_risk, inputs=[comm_in, rain_in, level_in, notes_in], outputs=risk_out)
-
-    with gr.Tab("Data Pipeline (bulk CSV analysis)"):
-        gr.Markdown(
-            "Upload a CSV with columns for date, community, rainfall, and water level "
-            "(headers can vary, the pipeline matches common aliases). Rows that cross a "
-            "threshold automatically raise an alert and bulk-notify that community's "
-            "contact list, so avoid uploading old historical data unless you intend for "
-            "real contacts to be notified about it."
-        )
-        with gr.Row():
-            csv_input = gr.File(label="Rainfall / water level CSV", file_types=[".csv"], type="filepath")
-            sample_btn = gr.Button("Load sample data instead")
-        report = gr.Markdown()
-        with gr.Row():
-            cleaned_out = gr.Dataframe(label="Cleaned, schema aligned rows", wrap=True)
-        missing_out = gr.Dataframe(label="Missing data by field (%)", visible=True)
-        csv_input.change(process_csv, inputs=csv_input, outputs=[report, cleaned_out, missing_out])
-        sample_btn.click(load_sample_data, outputs=[report, cleaned_out, missing_out])
 
     with gr.Tab("Admin"):
         gr.Markdown(
             "Everything here requires the admin password, set once as `ADMIN_PASSWORD` "
-            "in Render's Environment tab. This is where whoever is in charge imports each "
-            "community's contact list in bulk (so residents never need to sign up "
-            "themselves) and keeps the current water level up to date for the automatic "
-            "forecast-based check."
+            "in Render's Environment tab. This is where the community contact lists are "
+            "managed and the forecast check can be run on demand."
         )
         admin_password = gr.Textbox(label="Admin password", type="password")
 
-        gr.Markdown("### Import a community's contact list (CSV with columns: name, phone, email)")
+        gr.Markdown("### Community contact lists — import a CSV with columns: name, phone, email")
         with gr.Row():
             import_community = gr.Dropdown(label="Community", choices=COMMUNITIES, value="Mepe")
             import_file = gr.File(label="Contacts CSV", file_types=[".csv"], type="filepath")
@@ -889,14 +675,12 @@ with gr.Blocks(title="FloodGuard AI") as demo:
         gr.Markdown(
             "### Run the automatic forecast check now\n"
             "Normally runs every 6 hours by itself, so real lead time stays "
-            "within about 12-24 hours before rain arrives. It looks at the rainfall "
-            "**forecast for the next 24 hours**, works out the specific hours "
-            "heavy rain is expected, and warns people before flooding happens, "
-            "not after. Use this button to run it immediately, for testing or a demo."
+            "within about 12-24 hours before rain arrives. Use this button to "
+            "run it immediately, for testing or a demo."
         )
         run_now_btn = gr.Button("Run check now", variant="primary")
         run_now_out = gr.Markdown()
-        run_now_alerts = gr.Dataframe(label="Alerts raised (all sources)")
+        run_now_alerts = gr.Dataframe(label="Alerts raised")
         run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
 
 if __name__ == "__main__":
