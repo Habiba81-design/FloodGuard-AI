@@ -2,7 +2,7 @@
 FloodGuard AI prototype pipeline.
 Raw source upload, then real cleaning and missing data analysis, then
 threshold and flood event detection, then risk classification, then a live
-community risk dashboard with automatic forward-looking forecast checks and
+automatic forward-looking forecast checks and
 real bulk outbound alerts, all in one Gradio app.
 
 Run locally:
@@ -26,7 +26,7 @@ Outbound alerts (optional, only active once configured):
     SMS (Ghana numbers, via Arkesel): ARKESEL_API_KEY, ARKESEL_SENDER_ID
         (the sender name you registered with Arkesel, max 11 characters).
     Optional: APP_URL (your app's link, shown in the 'stop alerts' text).
-    Without these, contact lists and the dashboard still work, alerts are
+    Without these, sign-ups still work, alerts are
     just logged instead of actually sent.
 
 Important limitation on Render's free tier: a free Web Service spins down
@@ -353,46 +353,64 @@ def _STOP_FOOTER():
     return f"\n\nTo stop these alerts, {where} and use 'Stop alerts' with this phone number or email."
 
 
+_RAIN_ONLY_STEPS = [
+    "Expect heavy rain. Avoid low-lying roads, drains and river banks while it falls.",
+    "Don't wait for the rain to start: move valuables and documents off the floor now.",
+    "Keep your phone charged so you can receive updates.",
+    "Check on elderly or disabled neighbours who may need help.",
+]
+
+
+def _rain_summary_text(rainfall_mm, window_start, window_end, info):
+    """The rainfall part of an alert: how much, when, and how heavy."""
+    info = info or {}
+    lines = []
+    if rainfall_mm is not None:
+        lines.append(f"- Total rain expected in the next 24 hours: about {rainfall_mm:.0f} mm")
+    if window_start:
+        when = f"between {window_start} and {window_end}" if window_end and window_end != window_start else f"around {window_start}"
+        hours = info.get("hours_until")
+        lead = f" (starting in about {hours} hour{'s' if hours != 1 else ''})" if hours is not None and hours > 0 else " (starting very soon)"
+        lines.append(f"- Heaviest rain expected: {when}{lead}")
+    peak = info.get("peak_mm_h")
+    if peak:
+        lines.append(f"- Strongest rainfall in a single hour: about {peak:.0f} mm")
+    return "\n".join(lines) if lines else "- Rainfall details are not available right now."
+
+
 def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
-                              forecast=False, window_start=None, window_end=None):
-    info = _LEVEL_PLAIN.get(level, {"headline": "", "meaning": "", "steps": []})
-    rainfall_txt = f"{rainfall_mm:.0f} millimetres" if rainfall_mm is not None else "not available"
+                              forecast=False, window_start=None, window_end=None,
+                              info=None, flood_alert=True, water_tracked=True):
+    """flood_alert=False means this is a heavy-rain heads-up: the flood risk
+    itself is only LOW/MODERATE, but a lot of rain is coming."""
+    plain = _LEVEL_PLAIN.get(level, {"headline": "", "meaning": "", "steps": []})
     water_txt = f"{water_level_m:.1f} metres" if water_level_m is not None else "not available"
+    water_line = (f"The river or water level being tracked for {community} is {water_txt}.\n\n"
+                  if water_tracked else "")
+    rain_block = _rain_summary_text(rainfall_mm, window_start, window_end, info)
 
-    if forecast:
-        if window_start:
-            when_txt = f"between {window_start} and {window_end}" if window_end and window_end != window_start else f"around {window_start}"
-            measured_para = (
-                f"What we expect: heavy rain is forecast {when_txt}. Over the "
-                f"whole of the next 24 hours, the total rainfall is expected "
-                f"to be about {rainfall_txt}. Right now, the river or water "
-                f"level being tracked for {community} is {water_txt}."
-            )
-        else:
-            measured_para = (
-                f"What we expect: rainfall over the next 24 hours is forecast "
-                f"to be about {rainfall_txt}. Right now, the river or water "
-                f"level being tracked for {community} is {water_txt}."
-            )
-        lead = "This is an early warning based on the weather forecast.\n\n"
+    if flood_alert:
+        title = f"FLOOD ALERT for {community}"
+        headline = plain["headline"]
+        meaning = plain["meaning"]
+        steps = plain["steps"]
     else:
-        measured_para = (
-            f"What was reported: rainfall of about {rainfall_txt}, and a "
-            f"river or water level of {water_txt}, for {community}."
-        )
-        lead = ""
+        title = f"HEAVY RAIN ALERT for {community}"
+        headline = "Heavy rain is forecast for your area."
+        meaning = ("The rain forecast is heavy enough to be worth preparing for, "
+                   "even though the flood risk is not high right now.")
+        steps = _RAIN_ONLY_STEPS
 
-    steps_txt = "\n".join(f"{i}. {s}" for i, s in enumerate(info["steps"], start=1))
-
+    steps_txt = "\n".join(f"{i}. {x}" for i, x in enumerate(steps, start=1))
     return (
-        f"FLOOD ALERT for {community}\n"
-        f"Risk level: {level}\n\n"
-        f"{info['headline']}\n\n"
-        f"{lead}"
-        f"{measured_para}\n\n"
-        f"What this means: {info['meaning']}\n\n"
-        f"What to do:\n"
-        f"{steps_txt}\n\n"
+        f"{title}\n"
+        f"Flood risk: {level}\n\n"
+        f"{headline}\n\n"
+        f"This is an early warning based on the weather forecast.\n\n"
+        f"Rain forecast:\n{rain_block}\n\n"
+        f"{water_line}"
+        f"What this means: {meaning}\n\n"
+        f"What to do:\n{steps_txt}\n\n"
         f"Please also follow any guidance from local authorities and emergency services. "
         f"If you are unsure what to do, ask a neighbour, a community leader, "
         f"or call your local emergency number.\n\n"
@@ -404,16 +422,12 @@ def _plain_language_message(community, level, rainfall_mm, water_level_m, reason
 
 
 def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_level_m=None,
-                        forecast=False, window_start=None, window_end=None):
-    """Bulk send a real email/SMS to every contact imported for this
-    community, or for All communities. Returns a short markdown summary.
-    forecast=True means the numbers behind this alert are a weather
-    forecast for what's coming, not a report of current conditions, and the
-    message is worded accordingly. window_start/window_end, if known, name
-    the specific hours the heaviest rain is expected."""
-    if level not in ("HIGH", "CRITICAL"):
-        return ""
-
+                        forecast=False, window_start=None, window_end=None,
+                        info=None, flood_alert=True, water_tracked=True):
+    """Send a real email/SMS to everyone subscribed to this place. Called for
+    both flood alerts (HIGH/CRITICAL risk) and heavy-rain heads-ups. The
+    caller decides when to send; this just builds and delivers the message.
+    Returns a short markdown summary."""
     targets = [
         s for s in db.get_subscribers()
         if s["community"].strip().lower() == community.strip().lower()
@@ -421,29 +435,37 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
     ]
 
     if not targets:
-        return f"\n\nNo contacts imported for {community} yet, so no outbound alert was sent."
+        return f"\n\nNo contacts for {community} yet, so no outbound alert was sent."
 
     message = _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
-                                       forecast=forecast, window_start=window_start, window_end=window_end)
+                                       forecast=forecast, window_start=window_start, window_end=window_end,
+                                       info=info, flood_alert=flood_alert, water_tracked=water_tracked)
+    hours = (info or {}).get("hours_until")
+    when = f" in about {hours}h" if hours else ""
+    if flood_alert:
+        subject = f"⚠️ Flood alert: {level} risk in {community}{when}"
+        sms_message = message
+    else:
+        subject = f"🌧️ Heavy rain expected in {community}{when}"
+        sms_message = message
 
     sent_email, sent_sms, failed = 0, 0, 0
     reasons = set()
     for s in targets:
         if s.get("email"):
-            subject = f"⚠️ Flood Alert: {level} risk in {community}" if level in ("HIGH", "CRITICAL") else f"Flood update: {community}"
             ok, why = _send_email(s["email"], subject, message)
             sent_email += 1 if ok else 0
             failed += 0 if ok else 1
             if not ok:
                 reasons.add(f"email: {why}")
         if s.get("phone"):
-            ok, why = _send_sms(s["phone"], message)
+            ok, why = _send_sms(s["phone"], sms_message)
             sent_sms += 1 if ok else 0
             failed += 0 if ok else 1
             if not ok:
                 reasons.add(f"SMS: {why}")
 
-    summary = f"\n\n**Bulk outbound alert:** {sent_email} email(s) and {sent_sms} SMS sent to contacts in {community}."
+    summary = f"\n\n**Outbound alert:** {sent_email} email(s) and {sent_sms} SMS sent to contacts in {community}."
     if failed:
         summary += f" {failed} delivery attempt(s) failed. Reason(s): " + "; ".join(sorted(reasons))
     return summary
@@ -510,10 +532,12 @@ def _fetch_forecast_rainfall_mm(lat, lon):
     'this is expected to happen', not 'this already happened'. Also picks
     out the specific block of hours when the rain is actually expected, so
     people know *when* to prepare, not just that a wet day is coming.
-    Returns (total_mm, window_start, window_end, error); window_start and
-    window_end are human readable strings like 'Mon 3:00 PM', or None if no
-    meaningful rain is expected in the window. error is None on success, a
-    short string on failure, never raises.
+    Returns (total_mm, window_start, window_end, error, info). window_start
+    and window_end are human readable strings like 'Mon 3:00 PM', or None if
+    no meaningful rain is expected in the window. error is None on success, a
+    short string on failure, never raises. info is a dict with
+    'start_iso' (local date-time rain starts), 'hours_until' (about how many
+    hours from now) and 'peak_mm_h' (heaviest single hour), or {} if unknown.
 
     Works anywhere: the forecast is requested in the place's own local
     timezone and the current hour is worked out from its UTC offset.
@@ -532,7 +556,7 @@ def _fetch_forecast_rainfall_mm(lat, lon):
         times = data.get("hourly", {}).get("time", [])
         values = data.get("hourly", {}).get("precipitation", [])
         if not times or not values:
-            return None, None, None, "No forecast data returned by the weather API."
+            return None, None, None, "No forecast data returned by the weather API.", {}
 
         # Forecast times are in the place's own local time ("timezone=auto"),
         # so shift the server's UTC clock by the place's UTC offset.
@@ -546,7 +570,7 @@ def _fetch_forecast_rainfall_mm(lat, lon):
         window_times = times[start:start + 24]
         window_values = values[start:start + 24]
         if not window_values:
-            return None, None, None, "Forecast window was empty."
+            return None, None, None, "Forecast window was empty.", {}
         total_mm = round(sum(window_values), 1)
 
         # Find the specific hours when rain is actually expected (>=1mm/h),
@@ -559,9 +583,14 @@ def _fetch_forecast_rainfall_mm(lat, lon):
             window_start_str = first_dt.strftime("%a %-I:%M %p")
             window_end_str = last_dt.strftime("%a %-I:%M %p")
 
-        return total_mm, window_start_str, window_end_str, None
+        info = {"peak_mm_h": max((v for v in window_values if v is not None), default=0)}
+        if rain_hour_idxs:
+            local_now = datetime.utcnow() + timedelta(seconds=offset_s)
+            hours_until = max(0, round((first_dt - local_now).total_seconds() / 3600))
+            info.update({"start_iso": first_dt.isoformat(), "hours_until": hours_until})
+        return total_mm, window_start_str, window_end_str, None, info
     except Exception as e:
-        return None, None, None, str(e)
+        return None, None, None, str(e), {}
 
 
 def _fetch_river_water_level(lat, lon):
@@ -622,24 +651,34 @@ def run_scheduled_check():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = []
     manual_water_levels = db.get_water_levels()
-    monitored = dict(COMMUNITY_COORDS)
+    # Only check places somebody is actually subscribed to (people who signed
+    # up for a place, plus any original community that has contacts).
+    monitored = {}
     try:
-        monitored.update(db.get_places())  # places people signed up for
+        subs = db.get_subscribers()
+        subscribed = {x["community"].strip().lower() for x in subs}
+        for name, coords in COMMUNITY_COORDS.items():
+            if name.lower() in subscribed or "all communities" in subscribed:
+                monitored[name] = coords
+        monitored.update(db.get_places())
     except Exception:
         pass
+    if not monitored:
+        return "No places have subscribers yet, so nothing was checked."
     for community, (lat, lon) in monitored.items():
-        rainfall_mm, window_start, window_end, err = _fetch_forecast_rainfall_mm(lat, lon)
+        rainfall_mm, window_start, window_end, err, rain_info = _fetch_forecast_rainfall_mm(lat, lon)
 
         auto_level_m, ratio, wl_err = _fetch_river_water_level(lat, lon)
         if auto_level_m is not None:
             water_level_m = auto_level_m
+            water_tracked = True
             water_source = f"automatic, from river discharge running at {ratio}x its recent normal level"
             db.set_water_level(community, water_level_m)  # keep the Admin table in sync
         else:
-            # No modelled river here (e.g. New Legon, which floods from
-            # drainage, not a river), so fall back to whatever an admin
-            # last entered by hand, or 0 if nothing has ever been set.
+            # No modelled river here (e.g. a drainage-only area), so fall
+            # back to whatever an admin last entered by hand, or 0.
             water_level_m = manual_water_levels.get(community, 0.0)
+            water_tracked = community in manual_water_levels  # only if an admin entered one
             water_source = f"manual entry, no automatic river data available ({wl_err})"
 
         notes = "Automatic forecast-based check."
@@ -649,32 +688,35 @@ def run_scheduled_check():
         if err:
             notes += f" Rainfall forecast fetch failed, treated as 0mm: {err}"
         level, reasoning = _risk_level(rainfall_mm or 0, water_level_m, "", rainfall_label="forecast (next 24h)")
-        # Every check (regardless of level) is logged to the readings table,
-        # which is what powers the dashboard's "latest reading per
-        # community" view. The alerts table is different: it should only
-        # ever contain real HIGH/CRITICAL alerts, never routine LOW/MODERATE
-        # checks, or "Alerts sent" becomes a log of everything instead of a
-        # log of actual warnings. Previously _raise_alert ran unconditionally
-        # here, which meant every 6-hour check for every community showed up
-        # as an "alert" even at 0.2mm of rain. Fixed by moving it inside the
-        # HIGH/CRITICAL branch below, alongside the real outbound dispatch.
-        # Current status only for readings: drop this community's previous
-        # reading before saving the new one (needs db.delete_reading_for in
-        # db.py; without it, it falls back to the old behaviour). Alerts are
-        # NOT deleted: the alert history is kept.
+
+        flood_alert = level in ("HIGH", "CRITICAL")
+        heavy_rain = ((rainfall_mm or 0) >= RAIN_ALERT_MM
+                      or (rain_info.get("peak_mm_h") or 0) >= RAIN_ALERT_PEAK_MM_H)
+
+        # Readings show current status only: drop this community's previous
+        # reading before saving the new one. Alerts are NOT deleted: the
+        # alert history is kept.
         if hasattr(db, "delete_reading_for"):
             db.delete_reading_for(community)
-        db.add_reading(now, community, rainfall_mm or 0, water_level_m, level, level in ("HIGH", "CRITICAL"))
-        if level in ("HIGH", "CRITICAL"):
-            _raise_alert(now, community, rainfall_mm or 0, water_level_m, level, notes, "scheduled")
-            # Skip re-sending if we already warned about this exact rain
-            # window for this community, so people don't get the same
-            # forecast alert every few hours while it's still pending.
-            dedupe_key = f"forecast:{window_start or 'unknown'}"
+        db.add_reading(now, community, rainfall_mm or 0, water_level_m, level, flood_alert)
+
+        # Send when flood risk is HIGH/CRITICAL, or when heavy rain is
+        # forecast even if flood risk is lower. The forecast looks 24 hours
+        # ahead and runs every 6 hours, so rain is first caught about 18-24
+        # hours before it starts, and always at least 12 hours ahead unless
+        # the forecast itself only firmed up later.
+        if flood_alert or heavy_rain:
+            alert_notes = notes if flood_alert else "Heavy rain alert. " + notes
+            _raise_alert(now, community, rainfall_mm or 0, water_level_m, level, alert_notes, "scheduled")
+            # One alert per place per rain day (and risk level), so people
+            # aren't messaged every 6 hours about the same rain.
+            day = (rain_info.get("start_iso") or datetime.now().isoformat())[:10]
+            dedupe_key = f"forecast:{day}:{level}:{'flood' if flood_alert else 'rain'}"
             if not db.is_seen_key(community, dedupe_key):
                 db.add_seen_key(community, dedupe_key)
                 _dispatch_outbound(community, level, reasoning, rainfall_mm, water_level_m,
-                                    forecast=True, window_start=window_start, window_end=window_end)
+                                    forecast=True, window_start=window_start, window_end=window_end,
+                                    info=rain_info, flood_alert=flood_alert, water_tracked=water_tracked)
         rain_display = f"{rainfall_mm}mm forecast" if rainfall_mm is not None else "unavailable"
         window_display = f", heaviest rain {window_start}-{window_end}" if window_start else ""
         lines.append(f"- **{community}**: {rain_display}{window_display}, water level {water_level_m}m ({water_source}) -> {_risk_badge_html(level)}")
@@ -710,7 +752,7 @@ def check_my_area(place_name):
     if err:
         return f"**Could not check this location.** {err}"
 
-    rainfall_mm, window_start, window_end, rain_err = _fetch_forecast_rainfall_mm(lat, lon)
+    rainfall_mm, window_start, window_end, rain_err, rain_info = _fetch_forecast_rainfall_mm(lat, lon)
     water_level_m, ratio, wl_err = _fetch_river_water_level(lat, lon)
 
     if water_level_m is None:
@@ -731,6 +773,10 @@ def check_my_area(place_name):
         window_line = f"\n\nHeaviest rain is expected between **{window_start}** and **{window_end}**."
 
     rain_line = f"{rainfall_mm}mm forecast over the next 24 hours" if rainfall_mm is not None else "unavailable right now"
+    if rain_info.get("hours_until"):
+        window_line += f" That is about {rain_info['hours_until']} hours from now."
+    if rain_info.get("peak_mm_h"):
+        window_line += f" Strongest rainfall in a single hour: about {rain_info['peak_mm_h']:.0f}mm."
 
     return (
         f"### {display_name}\n\n"
@@ -901,6 +947,12 @@ MAX_PLACES = int(os.environ.get("MAX_PLACES", "100"))
 MAX_SUBSCRIBERS = int(os.environ.get("MAX_SUBSCRIBERS", "2000"))
 # SMS is only offered for Ghana numbers (+233); everyone else uses email.
 SMS_COUNTRY_CODE = "+233"
+
+# A "heavy rain" alert is sent (even when flood risk is only LOW/MODERATE) if
+# the next 24 hours bring at least this much rain in total, or at least this
+# much in a single hour. Both can be changed with environment variables.
+RAIN_ALERT_MM = float(os.environ.get("RAIN_ALERT_MM", "30"))
+RAIN_ALERT_PEAK_MM_H = float(os.environ.get("RAIN_ALERT_PEAK_MM_H", "8"))
 CODES_PER_HOUR = 3
 MAX_CODE_ATTEMPTS = 5
 
@@ -1020,17 +1072,16 @@ def stop_alerts(channel, contact):
 
 def clear_dashboard_and_alerts(password):
     """Admin only: wipes every stored reading and every raised alert, so the
-    Community Risk Dashboard and the 'Alerts raised' tables start empty.
+    'Alerts raised' table starts empty.
     Contacts and water levels are not touched."""
     ok, err = _check_admin_password(password)
     if not ok:
-        return err, _dashboard_table(), _alerts_table(), _alerts_table()
+        return err, _alerts_table()
     if not hasattr(db, "clear_readings_and_alerts"):
         return ("db.py is missing `clear_readings_and_alerts()`. Add it to db.py first.",
-                _dashboard_table(), _alerts_table(), _alerts_table())
+                _alerts_table())
     db.clear_readings_and_alerts()
-    return ("Cleared all risk readings and alerts.",
-            _dashboard_table(), _alerts_table(), _alerts_table())
+    return "Cleared all risk readings and alerts.", _alerts_table()
 
 
 def _scheduler_loop():
@@ -1050,27 +1101,6 @@ def _scheduler_loop():
 
 _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
 _scheduler_thread.start()
-
-
-# ---------------------------------------------------------------------------
-# Dashboard: readings and alerts raised by the automatic forecast check.
-# ---------------------------------------------------------------------------
-def _dashboard_table():
-    """Latest reading per community only, not every 6-hour check piled up.
-    The scheduled check logs a new row every time it runs, so without this
-    dedupe a community with no change in conditions would just accumulate
-    duplicate-looking rows every 6 hours."""
-    rows = db.get_readings()
-    if not rows:
-        return pd.DataFrame(columns=["timestamp", "community", "rainfall_mm", "water_level_m", "risk_level", "flood_event_flag"])
-    df = pd.DataFrame(rows)
-    df["timestamp"] = df["timestamp"].astype(str)
-    # db.get_readings() returns oldest first (ordered by id), so keeping the
-    # last row per community keeps the most recent check for each one.
-    df = df.drop_duplicates(subset="community", keep="last")
-    df = df.rename(columns={"data_quality_flag": "risk_level"})
-    df = df.sort_values(by="community")
-    return df[["timestamp", "community", "rainfall_mm", "water_level_m", "risk_level", "flood_event_flag"]]
 
 
 # ---------------------------------------------------------------------------
@@ -1200,26 +1230,10 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             stop_out = gr.Markdown()
             stop_btn.click(stop_alerts, inputs=[stop_channel, stop_contact], outputs=stop_out)
 
-    with gr.Tab("Community Risk Dashboard"):
-        with gr.Column():
-            gr.Markdown(
-                "### How this works\n"
-                "Every 6 hours the system checks the rainfall forecast, and where "
-                "a river is nearby, the current water level too, for each "
-                "community, works out the risk level, and shows it below. "
-                "Automatic alerts are sent by email/SMS whenever a community "
-                "reaches HIGH or CRITICAL risk."
-            )
-            refresh_btn = gr.Button("Refresh dashboard")
-        with gr.Column():
-            gr.Markdown("### Risk readings per community")
-            readings_dashboard = gr.Dataframe(show_label=False, value=_dashboard_table, wrap=True)
-        with gr.Column():
-            gr.Markdown("### Alerts sent")
-            alerts_dashboard = gr.Dataframe(show_label=False, value=_alerts_table, wrap=True)
-        refresh_btn.click(lambda: (_dashboard_table(), _alerts_table()), outputs=[readings_dashboard, alerts_dashboard])
-
-    with gr.Tab("Admin"):
+    # The Admin tab is hidden from subscribers. It only appears for whoever
+    # opens the site with ?admin=1 at the end of the link, and every action
+    # inside it still needs the admin password.
+    with gr.Tab("Admin", visible=False) as admin_tab:
         with gr.Column():
             gr.Markdown(
                 "### Admin access\n"
@@ -1270,7 +1284,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             )
             run_now_btn = gr.Button("Run check now", variant="primary")
             run_now_out = gr.Markdown()
-            run_now_alerts = gr.Dataframe(label="Alerts raised", wrap=True)
+            run_now_alerts = gr.Dataframe(label="Alerts raised (history)", value=_alerts_table, wrap=True)
             run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
 
         with gr.Column():
@@ -1293,17 +1307,26 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         with gr.Column():
             gr.Markdown(
                 "### Clear dashboard and alerts\n"
-                "Deletes every stored risk reading and every raised alert, so the "
-                "Community Risk Dashboard and the alert tables start empty. Contacts "
-                "and water levels are kept. The next check repopulates the dashboard."
+                "Deletes every stored risk reading and every raised alert. Contacts "
+                "and water levels are kept."
             )
             clear_btn = gr.Button("Clear all readings and alerts", variant="stop")
             clear_out = gr.Markdown()
             clear_btn.click(
                 clear_dashboard_and_alerts,
                 inputs=[admin_password],
-                outputs=[clear_out, readings_dashboard, alerts_dashboard, run_now_alerts],
+                outputs=[clear_out, run_now_alerts],
             )
+
+    def _reveal_admin(request: gr.Request):
+        show = False
+        try:
+            show = request.query_params.get("admin") == "1"
+        except Exception:
+            pass
+        return gr.update(visible=show)
+
+    demo.load(_reveal_admin, None, admin_tab)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
