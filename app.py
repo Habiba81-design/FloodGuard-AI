@@ -917,9 +917,8 @@ FLOODGUARD_CSS = """
     letter-spacing: -0.01em;
 }
 
-/* --- Hero banner: real photo background (river/water, licensed free to use
-   on Unsplash, https://unsplash.com/photos/aEzm7Gb37a4), with a dark
-   gradient overlay so the white text stays readable over it --- */
+/* --- Hero banner: flood photo (from the Phase 1 proposal) as background, with a
+   dark gradient overlay so the white text stays readable over it --- */
 .fg-hero {
     position: relative;
     padding: 34px 26px 26px 26px !important;
@@ -927,7 +926,7 @@ FLOODGUARD_CSS = """
     border-radius: 0 0 22px 22px;
     background:
         linear-gradient(135deg, rgba(11,61,63,0.82) 0%, rgba(15,100,102,0.78) 55%, rgba(20,145,155,0.65) 100%),
-        url("https://images.unsplash.com/photo-1575397283492-fde3e31e31f8?fm=jpg&q=70&w=1600&auto=format&fit=crop");
+        url("{HERO_IMG}");
     background-blend-mode: normal;
     background-size: cover;
     background-position: center;
@@ -955,19 +954,6 @@ FLOODGUARD_CSS = """
     letter-spacing: 0.02em;
 }
 
-/* --- Section cards: each tab reads as its own distinct block, like
-   sections on a one-page site, instead of one long undifferentiated form --- */
-.fg-card {
-    border: 1px solid var(--block-border-color) !important;
-    border-radius: 16px !important;
-    padding: 18px !important;
-    margin-bottom: 18px !important;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
-}
-.fg-card h3 {
-    margin-top: 0 !important;
-    font-size: 1.12em !important;
-}
 
 /* Bigger, bolder tab labels */
 .tabs > .tab-nav button {
@@ -975,6 +961,13 @@ FLOODGUARD_CSS = """
     font-size: 1.03em !important;
 }
 """
+
+# Embed the hero photo (hero.jpg, next to this file) directly in the CSS so no
+# static-file route is needed.
+import base64
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hero.jpg"), "rb") as _f:
+    _hero_b64 = base64.b64encode(_f.read()).decode()
+FLOODGUARD_CSS = FLOODGUARD_CSS.replace("{HERO_IMG}", "data:image/jpeg;base64," + _hero_b64)
 
 with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", secondary_hue="amber"), css=FLOODGUARD_CSS) as demo:
     with gr.Column(elem_classes="fg-hero"):
@@ -1007,7 +1000,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
 
     with gr.Tab("Community Risk Dashboard"):
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown(
                 "### How this works\n"
                 "Every 6 hours the system checks the rainfall forecast, and where "
@@ -1017,16 +1010,16 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
                 "reaches HIGH or CRITICAL risk."
             )
             refresh_btn = gr.Button("Refresh dashboard")
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown("### Risk readings per community")
             readings_dashboard = gr.Dataframe(show_label=False, value=_dashboard_table, wrap=True)
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown("### Alerts sent")
             alerts_dashboard = gr.Dataframe(show_label=False, value=_alerts_table, wrap=True)
         refresh_btn.click(lambda: (_dashboard_table(), _alerts_table()), outputs=[readings_dashboard, alerts_dashboard])
 
     with gr.Tab("Admin"):
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown(
                 "### Admin access\n"
                 "Everything on this page requires the admin password, set once "
@@ -1036,7 +1029,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             )
             admin_password = gr.Textbox(label="Admin password", type="password")
 
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown("### Community contact lists — import a CSV with columns: name, phone, email")
             with gr.Row():
                 import_community = gr.Dropdown(label="Community", choices=COMMUNITIES, value="Mepe")
@@ -1050,7 +1043,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
                 outputs=[import_out, contact_counts],
             )
 
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown(
                 "### Water level (fallback only)\n"
                 "Water level is now fetched automatically from live river discharge data "
@@ -1067,7 +1060,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             wl_table = gr.Dataframe(label="Latest water level per community", value=_water_levels_table, wrap=True)
             wl_btn.click(update_water_level, inputs=[admin_password, wl_community, wl_level], outputs=[wl_out, wl_table])
 
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown(
                 "### Run the automatic forecast check now\n"
                 "Normally runs every 6 hours by itself, so real lead time stays "
@@ -1079,7 +1072,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             run_now_alerts = gr.Dataframe(label="Alerts raised", wrap=True)
             run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
 
-        with gr.Group(elem_classes="fg-card"):
+        with gr.Column():
             gr.Markdown(
                 "### Backtest against real, documented past floods\n"
                 "Runs the exact same risk logic used live, but against REAL historical "
