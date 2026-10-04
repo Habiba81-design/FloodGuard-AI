@@ -908,4 +908,122 @@ def _dashboard_table():
 FLOODGUARD_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap');
 h1, h2, h3, .prose h1, .prose h2, .prose h3 {
-    font-fa
+    font-family: 'Space Grotesk', sans-serif !important;
+    letter-spacing: -0.01em;
+}
+.risk-legend {
+    display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 4px 0;
+}
+.risk-legend span {
+    padding: 3px 12px; border-radius: 999px; font-weight: 600; color: #fff; font-size: 0.85em;
+}
+"""
+
+with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", secondary_hue="amber"), css=FLOODGUARD_CSS) as demo:
+    gr.Markdown(
+        "# FloodGuard AI\n"
+        "An automatic flood warning system for flood prone communities in Ghana. "
+        "It looks at the weather forecast and warns people 12 to 24 hours before "
+        "flooding happens, so they have time to prepare instead of finding out "
+        "after the flood has already started."
+    )
+    gr.HTML(
+        '<div class="risk-legend">'
+        '<span style="background:#2F9E44;">LOW</span>'
+        '<span style="background:#F2A007;">MODERATE</span>'
+        '<span style="background:#E8590C;">HIGH</span>'
+        '<span style="background:#C92A2A;">CRITICAL</span>'
+        '</div>'
+    )
+
+    with gr.Tab("Check My Area"):
+        gr.Markdown(
+            "Check flood risk for anywhere, not just the monitored communities below. "
+            "This is a one-time check: nothing is saved, and no alert is sent."
+        )
+        with gr.Row():
+            place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
+            check_btn = gr.Button("Check my risk", variant="primary")
+        place_out = gr.Markdown()
+        check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
+
+    with gr.Tab("Community Risk Dashboard"):
+        gr.Markdown(
+            "Forecast based prediction: every 6 hours the system checks the rainfall "
+            "forecast, and where a river is nearby, the current water level too, for "
+            "each community, works out the risk level, and shows it below. "
+            "Automatic alerts are sent by email/SMS whenever a community reaches "
+            "HIGH or CRITICAL risk."
+        )
+        refresh_btn = gr.Button("Refresh dashboard")
+        readings_dashboard = gr.Dataframe(label="Risk readings per community", value=_dashboard_table, wrap=True)
+        alerts_dashboard = gr.Dataframe(label="Alerts sent", value=_alerts_table, wrap=True)
+        refresh_btn.click(lambda: (_dashboard_table(), _alerts_table()), outputs=[readings_dashboard, alerts_dashboard])
+
+    with gr.Tab("Admin"):
+        gr.Markdown(
+            "Everything here requires the admin password, set once as `ADMIN_PASSWORD` "
+            "in Render's Environment tab. This is where the community contact lists are "
+            "managed and the forecast check can be run on demand."
+        )
+        admin_password = gr.Textbox(label="Admin password", type="password")
+
+        gr.Markdown("### Community contact lists — import a CSV with columns: name, phone, email")
+        with gr.Row():
+            import_community = gr.Dropdown(label="Community", choices=COMMUNITIES, value="Mepe")
+            import_file = gr.File(label="Contacts CSV", file_types=[".csv"], type="filepath")
+        import_btn = gr.Button("Import contacts", variant="primary")
+        import_out = gr.Markdown()
+        contact_counts = gr.Dataframe(label="Contacts per community", value=_subscriber_counts_table, wrap=True)
+        import_btn.click(
+            bulk_import_contacts,
+            inputs=[admin_password, import_community, import_file],
+            outputs=[import_out, contact_counts],
+        )
+
+        gr.Markdown(
+            "### Water level (fallback only)\n"
+            "Water level is now fetched automatically from live river discharge data "
+            "for communities near a modelled river (Mepe, Anloga, Sokpoe). It's "
+            "overwritten by that automatic reading every check. Only use this manual "
+            "field for a community with no river nearby, like New Legon, where there "
+            "is no automatic source and flooding comes from drainage, not a river."
+        )
+        with gr.Row():
+            wl_community = gr.Dropdown(label="Community", choices=list(COMMUNITY_COORDS.keys()), value="Mepe")
+            wl_level = gr.Number(label="Water level (m)", value=0)
+        wl_btn = gr.Button("Update water level")
+        wl_out = gr.Markdown()
+        wl_table = gr.Dataframe(label="Latest water level per community", value=_water_levels_table, wrap=True)
+        wl_btn.click(update_water_level, inputs=[admin_password, wl_community, wl_level], outputs=[wl_out, wl_table])
+
+        gr.Markdown(
+            "### Run the automatic forecast check now\n"
+            "Normally runs every 6 hours by itself, so real lead time stays "
+            "within about 12-24 hours before rain arrives. Use this button to "
+            "run it immediately, for testing or a demo."
+        )
+        run_now_btn = gr.Button("Run check now", variant="primary")
+        run_now_out = gr.Markdown()
+        run_now_alerts = gr.Dataframe(label="Alerts raised", wrap=True)
+        run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
+
+        gr.Markdown(
+            "### Backtest against real, documented past floods\n"
+            "Runs the exact same risk logic used live, but against REAL historical "
+            "rainfall data for two confirmed, recent flood events near New Legon: "
+            "the 18 May 2025 Accra floods (5 deaths, 3,000+ displaced, NADMO "
+            "confirmed) and the 29 June 2026 Accra floods, the most recent major "
+            "flooding in Ghana. Instead of made-up numbers, this uses real "
+            "recorded data. It calls live external APIs, so it can take a few "
+            "seconds and only works once the app is actually deployed with "
+            "network access."
+        )
+        backtest_btn = gr.Button("Run backtest")
+        backtest_out = gr.Markdown()
+        backtest_table = gr.Dataframe(label="Day by day breakdown", wrap=True)
+        backtest_btn.click(run_backtest, inputs=[admin_password], outputs=[backtest_out, backtest_table])
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 7860))
+    demo.launch(server_name="0.0.0.0", server_port=port)
