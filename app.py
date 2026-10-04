@@ -314,6 +314,7 @@ _LEVEL_PLAIN = {
             "Keep your phone charged and switch on, so you can receive further updates.",
             "Check on elderly, disabled, or sick neighbours who may need help moving.",
             "Follow any instructions given by local authorities or emergency services, even if they differ from this message.",
+            "Cancel or postpone travel and other plans for today.",
         ],
     },
     "HIGH": {
@@ -325,6 +326,7 @@ _LEVEL_PLAIN = {
             "Check on elderly or disabled neighbours and agree on a plan with them.",
             "Avoid low-lying roads, especially after dark, until the risk passes.",
             "Stay ready to move to higher ground if conditions get worse.",
+            "Review your schedule: postpone travel, market trips and farm work if you can, and move animals, farm inputs and stock to a safe place.",
         ],
     },
     "MODERATE": {
@@ -353,29 +355,39 @@ def _STOP_FOOTER():
     return f"\n\nTo stop these alerts, {where} and use 'Stop alerts' with this phone number or email."
 
 
-_RAIN_ONLY_STEPS = [
-    "Expect heavy rain. Avoid low-lying roads, drains and river banks while it falls.",
-    "Don't wait for the rain to start: move valuables and documents off the floor now.",
-    "Keep your phone charged so you can receive updates.",
-    "Check on elderly or disabled neighbours who may need help.",
-]
+def _rain_steps(level):
+    """Advice for a heavy-rain alert where flood risk is only LOW or MODERATE.
+    Covers planning the day around the rain and protecting belongings."""
+    steps = [
+        "Review your schedule: postpone travel, market trips and farm work during the rain if you can.",
+        "Keep clear of streams, drains, river banks and low-lying roads while it falls.",
+    ]
+    if level == "MODERATE":
+        steps.append("Flood chance is MODERATE: move documents, electronics, food stock and farm inputs off the floor or to higher ground now.")
+    else:
+        steps.append("Flood chance is LOW for now, but stay alert in case it changes, and keep valuables off the floor.")
+    steps += [
+        "Keep your phone charged so you can receive updates.",
+        "Never walk or drive through flood water. Tell your family and neighbours.",
+    ]
+    return steps
 
 
 def _rain_summary_text(rainfall_mm, window_start, window_end, info):
-    """The rainfall part of an alert: how much, when, and how heavy."""
+    """One-sentence rainfall summary: how much, how hard, and when."""
     info = info or {}
-    lines = []
-    if rainfall_mm is not None:
-        lines.append(f"- Total rain expected in the next 24 hours: about {rainfall_mm:.0f} mm")
+    if rainfall_mm is None:
+        return "Rainfall details are not available right now."
+    text = f"about {rainfall_mm:.0f} mm in the next 24 hours"
+    peak = info.get("peak_mm_h")
+    if peak and peak >= 1:
+        text += f" (up to {peak:.0f} mm in one hour)"
     if window_start:
         when = f"between {window_start} and {window_end}" if window_end and window_end != window_start else f"around {window_start}"
         hours = info.get("hours_until")
-        lead = f" (starting in about {hours} hour{'s' if hours != 1 else ''})" if hours is not None and hours > 0 else " (starting very soon)"
-        lines.append(f"- Heaviest rain expected: {when}{lead}")
-    peak = info.get("peak_mm_h")
-    if peak:
-        lines.append(f"- Strongest rainfall in a single hour: about {peak:.0f} mm")
-    return "\n".join(lines) if lines else "- Rainfall details are not available right now."
+        lead = f", starting in about {hours} hour{'s' if hours != 1 else ''}" if hours is not None and hours > 0 else ", starting very soon"
+        text += f", heaviest {when}{lead}"
+    return text + "."
 
 
 def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
@@ -396,21 +408,20 @@ def _plain_language_message(community, level, rainfall_mm, water_level_m, reason
         steps = plain["steps"]
     else:
         title = f"HEAVY RAIN ALERT for {community}"
-        headline = "Heavy rain is forecast for your area."
+        headline = f"Heavy rain is forecast for your area. Chance of flooding: {level}."
         meaning = ("The rain forecast is heavy enough to be worth preparing for, "
-                   "even though the flood risk is not high right now.")
-        steps = _RAIN_ONLY_STEPS
+                   "even though the flood risk is not high right now. Plan your schedule "
+                   "and protect your belongings before it starts.")
+        steps = _rain_steps(level)
 
-    steps_txt = "\n".join(f"{i}. {x}" for i, x in enumerate(steps, start=1))
     return (
         f"{title}\n"
         f"Flood risk: {level}\n\n"
         f"{headline}\n\n"
         f"This is an early warning based on the weather forecast.\n\n"
-        f"Rain forecast:\n{rain_block}\n\n"
+        f"Rain forecast: {rain_block}\n\n"
         f"{water_line}"
         f"What this means: {meaning}\n\n"
-        f"What to do:\n{steps_txt}\n\n"
         f"Please also follow any guidance from local authorities and emergency services. "
         f"If you are unsure what to do, ask a neighbour, a community leader, "
         f"or call your local emergency number.\n\n"
@@ -419,6 +430,26 @@ def _plain_language_message(community, level, rainfall_mm, water_level_m, reason
         f"For those who want the numbers behind this alert: {reasoning}"
         f"{_STOP_FOOTER()}"
     )
+
+
+def _short_sms(community, level, rainfall_mm, flood_alert, info, window_start):
+    """A short text for SMS (long messages split into several paid parts)."""
+    info = info or {}
+    head = (f"FloodGuard FLOOD ALERT: {level} risk in {community}." if flood_alert
+            else f"FloodGuard: heavy rain expected in {community}.")
+    rain = f" About {rainfall_mm:.0f}mm in 24h." if rainfall_mm else ""
+    hours = info.get("hours_until")
+    when = (f" Starts in about {hours}h." if hours else (f" Rain around {window_start}." if window_start else ""))
+    chance = f" Flood chance: {level}."
+    if flood_alert:
+        act = " Move people, animals and valuables to higher ground now. Avoid flood water."
+    elif level == "MODERATE":
+        act = " Plan your day around the rain and move valuables off the floor."
+    else:
+        act = " Plan your day around the rain and avoid low roads and drains."
+    url = os.environ.get("APP_URL", "").strip()
+    stop = f" Stop alerts: {url}" if url else " To stop, use 'Stop alerts' on the FloodGuard page."
+    return head + rain + when + chance + act + stop
 
 
 def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_level_m=None,
@@ -444,10 +475,9 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
     when = f" in about {hours}h" if hours else ""
     if flood_alert:
         subject = f"⚠️ Flood alert: {level} risk in {community}{when}"
-        sms_message = message
     else:
-        subject = f"🌧️ Heavy rain expected in {community}{when}"
-        sms_message = message
+        subject = f"🌧️ Heavy rain expected in {community}{when} (flood chance: {level})"
+    sms_message = _short_sms(community, level, rainfall_mm, flood_alert, info, window_start)
 
     sent_email, sent_sms, failed = 0, 0, 0
     reasons = set()
@@ -583,7 +613,10 @@ def _fetch_forecast_rainfall_mm(lat, lon):
             window_start_str = first_dt.strftime("%a %-I:%M %p")
             window_end_str = last_dt.strftime("%a %-I:%M %p")
 
-        info = {"peak_mm_h": max((v for v in window_values if v is not None), default=0)}
+        info = {
+            "peak_mm_h": max((v for v in window_values if v is not None), default=0),
+            "next6_mm": round(sum(v or 0 for v in window_values[:6]), 1),
+        }
         if rain_hour_idxs:
             local_now = datetime.utcnow() + timedelta(seconds=offset_s)
             hours_until = max(0, round((first_dt - local_now).total_seconds() / 3600))
@@ -701,11 +734,14 @@ def run_scheduled_check():
         db.add_reading(now, community, rainfall_mm or 0, water_level_m, level, flood_alert)
 
         # Send when flood risk is HIGH/CRITICAL, or when heavy rain is
-        # forecast even if flood risk is lower. The forecast looks 24 hours
-        # ahead and runs every 6 hours, so rain is first caught about 18-24
-        # hours before it starts, and always at least 12 hours ahead unless
-        # the forecast itself only firmed up later.
-        if flood_alert or heavy_rain:
+        # forecast even if flood risk is lower.
+        # Only warn when the rain is expected within the next ALERT_LEAD_HOURS
+        # (12 by default), so people are not left waiting for rain that is
+        # still a day away and may come late. Flood risk driven by a river
+        # (no rain start time) is still sent straight away.
+        hours_until = rain_info.get("hours_until")
+        starts_soon = hours_until is None or hours_until <= ALERT_LEAD_HOURS
+        if (flood_alert or heavy_rain) and starts_soon:
             alert_notes = notes if flood_alert else "Heavy rain alert. " + notes
             _raise_alert(now, community, rainfall_mm or 0, water_level_m, level, alert_notes, "scheduled")
             # One alert per place per rain day (and risk level), so people
@@ -859,10 +895,16 @@ def check_my_area(place_name):
     if rain_info.get("peak_mm_h"):
         window_line += f" Strongest rainfall in a single hour: about {rain_info['peak_mm_h']:.0f}mm."
 
+    heavy_line = ""
+    if ((rainfall_mm or 0) >= RAIN_ALERT_MM
+            or (rain_info.get("peak_mm_h") or 0) >= RAIN_ALERT_PEAK_MM_H):
+        heavy_line = ("\n\n🌧️ **Heavy rain is forecast.** Review your schedule, avoid low-lying "
+                      "roads and drains, and move valuables off the floor.")
+
     return (
         f"### {display_name}\n\n"
         f"Risk level: {badge}\n\n"
-        f"Rainfall: {rain_line}.{window_line}\n\n"
+        f"Rainfall: {rain_line}.{window_line}{heavy_line}\n\n"
         f"{water_note}\n\n"
         f"---\n"
         f"*Want a warning before heavy rain reaches this area? Scroll down and "
@@ -1034,6 +1076,8 @@ SMS_COUNTRY_CODE = "+233"
 # much in a single hour. Both can be changed with environment variables.
 RAIN_ALERT_MM = float(os.environ.get("RAIN_ALERT_MM", "30"))
 RAIN_ALERT_PEAK_MM_H = float(os.environ.get("RAIN_ALERT_PEAK_MM_H", "8"))
+# Send an alert only when the rain is due to start within this many hours.
+ALERT_LEAD_HOURS = float(os.environ.get("ALERT_LEAD_HOURS", "12"))
 CODES_PER_HOUR = 3
 MAX_CODE_ATTEMPTS = 5
 
@@ -1066,7 +1110,7 @@ def _normalize_contact(channel, raw):
 
 def send_signup_code(place_name, channel, contact, consent):
     if not consent:
-        return "Please tick the box to agree to receive flood alerts."
+        return "Please tick the box to agree to receive heavy rain and flood alerts."
     value, err = _normalize_contact(channel, contact)
     if err:
         return err
@@ -1133,7 +1177,7 @@ def confirm_signup(channel, contact, code):
     except Exception as e:
         return f"Something went wrong on our side ({e}). Please try again."
     return (f"✅ You're signed up for **{place}**. We check the forecast every 6 hours and "
-            f"will message you if flood risk there reaches HIGH or CRITICAL. "
+            f"will message you if heavy rain is expected or flood risk there reaches HIGH or CRITICAL. "
             f"You can stop alerts any time using 'Stop alerts' below.")
 
 
@@ -1255,9 +1299,9 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
     with gr.Column(elem_classes="fg-hero"):
         gr.Markdown(
             "# 🌊 FloodGuard AI\n"
-            "An automatic flood warning system. Sign up for your area and get a message "
-            "when heavy rain puts it at risk. "
-            "It looks at the weather forecast and warns people 12 to 24 hours before "
+            "An automatic heavy rain and flood warning system. Sign up for your area and get a message "
+            "when heavy rain is coming or flooding is likely. "
+            "It looks at the weather forecast and warns people up to 12 hours before "
             "flooding happens, so they have time to prepare instead of finding out "
             "after the flood has already started."
         )
@@ -1276,7 +1320,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             "Type any village, town or city (add the district and country for small places) "
             "to see its flood risk for the next 24 hours. "
             "Then sign up below and we'll message you automatically when heavy "
-            "rain puts your area at HIGH or CRITICAL risk."
+            "rain is forecast for your area or flood risk reaches HIGH or CRITICAL."
         )
         with gr.Row():
             place_in = gr.Textbox(label="Place name", placeholder="Village, district, country (e.g. Dungu, Tamale, Ghana)")
@@ -1291,7 +1335,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         with gr.Row():
             su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Send alerts by")
             su_contact = gr.Textbox(label="Phone number or email", placeholder="Ghana phone (0201234567) or any email")
-        su_consent = gr.Checkbox(label="I agree to receive flood alerts for this place. I can stop any time.")
+        su_consent = gr.Checkbox(label="I agree to receive heavy rain and flood alerts for this place. I can stop any time.")
         su_send_btn = gr.Button("Send me a code", variant="primary")
         su_send_out = gr.Markdown()
         with gr.Row():
@@ -1361,7 +1405,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             gr.Markdown(
                 "### Run the automatic forecast check now\n"
                 "Normally runs every 6 hours by itself, so real lead time stays "
-                "within about 12-24 hours before rain arrives. Use this button to "
+                "within about 12 hours before rain arrives. Use this button to "
                 "run it immediately, for testing or a demo."
             )
             run_now_btn = gr.Button("Run check now", variant="primary")
