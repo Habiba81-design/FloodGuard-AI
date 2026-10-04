@@ -495,6 +495,41 @@ def _alerts_table():
 # Automatic rainfall fetch (Open-Meteo, free, no API key or signup needed)
 # and the forward-looking forecast check that ties everything together.
 # ---------------------------------------------------------------------------
+_METEO_CACHE = {}
+
+
+def _meteo_json(url, ttl=1800, timeout=10, retries=3):
+    """Fetch a weather-API URL as JSON, politely. Results are cached for
+    `ttl` seconds so repeated checks of the same place do not hit the free
+    API again, 'Too Many Requests' (429) and server errors are retried with a
+    short wait, and if the API still refuses, an older cached copy is used
+    rather than failing. Raises only if there is nothing to fall back on."""
+    now = time_module.time()
+    cached = _METEO_CACHE.get(url)
+    if cached and now - cached[0] < ttl:
+        return cached[1]
+    last_err = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                data = json.load(resp)
+            if len(_METEO_CACHE) > 500:
+                _METEO_CACHE.clear()
+            _METEO_CACHE[url] = (now, data)
+            return data
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code != 429 and e.code < 500:
+                break
+        except Exception as e:
+            last_err = e
+        if attempt < retries - 1:
+            time_module.sleep(2 * (attempt + 1))
+    if cached:
+        return cached[1]  # stale is better than nothing
+    raise last_err
+
+
 def _fetch_forecast_rainfall_mm(lat, lon):
     """Rainfall FORECAST for the next 24 hours starting from right now, at
     these coordinates. This looks forward, not backward, so an alert means
@@ -520,8 +555,7 @@ def _fetch_forecast_rainfall_mm(lat, lon):
     }
     url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
+        data = _meteo_json(url)
         times = data.get("hourly", {}).get("time", [])
         values = data.get("hourly", {}).get("precipitation", [])
         if not times or not values:
@@ -593,8 +627,7 @@ def _fetch_river_water_level(lat, lon):
     }
     url = "https://flood-api.open-meteo.com/v1/flood?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
+        data = _meteo_json(url)
         values = data.get("daily", {}).get("river_discharge", [])
         values = [v for v in values if v is not None]
         if len(values) < 2:
@@ -815,8 +848,7 @@ def _find_next_heavy_rain(lat, lon, days=5):
     }
     url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
+        data = _meteo_json(url)
         times = data.get("hourly", {}).get("time", [])
         values = data.get("hourly", {}).get("precipitation", [])
         if not times or not values:
@@ -852,6 +884,8 @@ def _find_next_heavy_rain(lat, lon, days=5):
                 }, None
         return {"found": False, "next24_mm": round(sum(vals[start:start + 24]), 1)}, None
     except Exception as e:
+        if "429" in str(e):
+            return None, "The weather service is busy right now. Please wait a minute and try again."
         return None, str(e)
 
 
