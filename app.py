@@ -1691,6 +1691,8 @@ if __name__ == "__main__":
         _fav = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home-screen.png")
         if "favicon_path" in _launch_params and os.path.exists(_fav):
             _launch_extra["favicon_path"] = _fav
+        if "pwa" in _launch_params:
+            _launch_extra["pwa"] = True   # makes the site installable as a standalone app
     except Exception:
         _launch_extra = {}
     demo.launch(server_name="0.0.0.0", server_port=port, **_launch_extra)
