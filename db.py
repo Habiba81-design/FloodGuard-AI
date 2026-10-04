@@ -131,6 +131,9 @@ def init_db():
                     PRIMARY KEY (community, ts_str)
                 );
             """)
+            # Welcome messages are never recorded in the alerts-sent history.
+            # Remove any that an earlier version saved (does nothing if none).
+            cur.execute("DELETE FROM alert_deliveries WHERE lower(trim(alert_type)) = 'welcome';")
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +413,10 @@ def get_subscribers_full():
 
 
 def log_delivery(community, alert_type, risk_level, channel, recipient, success, detail):
-    """Record one alert message that was attempted (sent or failed)."""
+    """Record one alert message that was attempted (sent or failed).
+    Welcome messages are never stored: only real rain / flood alerts are."""
+    if (alert_type or "").strip().lower() == "welcome":
+        return
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
