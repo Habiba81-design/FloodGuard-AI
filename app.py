@@ -1394,6 +1394,51 @@ def confirm_signup(channel, contact, code):
             f"{welcome_md}")
 
 
+# ---------------------------------------------------------------------------
+# Public "Live Stats" tab: overall numbers only. No phone numbers, emails or
+# individual subscribers are ever shown here.
+# ---------------------------------------------------------------------------
+def _usage_stats():
+    try:
+        subs = db.get_subscribers_full()
+        dels = db.get_deliveries(limit=100000)
+    except Exception as e:
+        return f"Could not load the numbers right now ({e}). Please try again."
+
+    total_subs = len(subs)
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    recent_subs = 0
+    for r in subs:
+        try:
+            if datetime.strptime(r["subscribed_at"], "%Y-%m-%d %H:%M") >= cutoff:
+                recent_subs += 1
+        except Exception:
+            pass
+    places = sorted({(r.get("place") or "").strip() for r in subs if (r.get("place") or "").strip()})
+
+    sent = [d for d in dels if d["status"] == "sent"]
+    email_n = sum(1 for d in sent if d["channel"] == "Email")
+    sms_n = sum(1 for d in sent if d["channel"] == "SMS")
+    # number of distinct alerts issued (one per place, type and day)
+    events = {(d["sent_at"][:10], d["place"], d["alert_type"], d["risk_level"]) for d in dels}
+
+    lines = [
+        f"**Subscribers:** {total_subs} ({recent_subs} joined in the last 7 days)",
+        f"**Places covered:** {len(places)}",
+    ]
+    if dels:
+        lines.append(f"**Alert messages delivered:** {len(sent)} of {len(dels)} "
+                     f"({round(100 * len(sent) / len(dels))}%), {email_n} by email and {sms_n} by SMS")
+        lines.append(f"**Rain and flood alerts issued:** {len(events)}")
+    else:
+        lines.append("**Alerts so far:** none have been sent yet.")
+    if places:
+        shown = places[:40]
+        more = f" and {len(places) - len(shown)} more" if len(places) > len(shown) else ""
+        lines.append("**Places:** " + "; ".join(shown) + more)
+    return "\n\n".join(lines)
+
+
 def _scheduler_loop():
     while True:
         try:
@@ -1534,9 +1579,21 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
 
         gr.Markdown("📲 **Share this page** with your family, neighbours and community WhatsApp groups so they get warned too.")
 
-    # The Admin tab is visible to everyone, but every action in it (viewing
-    # subscribers, viewing alerts sent, running a check) needs ADMIN_PASSWORD.
-    with gr.Tab("Admin"):
+    with gr.Tab("Live Stats"):
+        gr.Markdown(
+            "### How the system is being used\n"
+            "Live numbers from the system. Only totals and places are shown, "
+            "never anyone's phone number or email."
+        )
+        usage_md = gr.Markdown()
+        usage_refresh = gr.Button("Refresh numbers")
+        usage_refresh.click(_usage_stats, None, usage_md)
+
+    # The Admin tab is hidden from subscribers. It only appears for whoever
+    # opens the site with ?admin=1 at the end of the link, and every action in
+    # it (viewing subscribers, viewing alerts sent, running a check) still
+    # needs ADMIN_PASSWORD.
+    with gr.Tab("Admin", visible=False) as admin_tab:
         with gr.Column():
             gr.Markdown(
                 "### Admin\n"
@@ -1567,6 +1624,17 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             run_now_btn = gr.Button("Run check now")
             run_now_out = gr.Markdown()
             run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out])
+
+    def _reveal_admin(request: gr.Request):
+        show = False
+        try:
+            show = request.query_params.get("admin") == "1"
+        except Exception:
+            pass
+        return gr.update(visible=show)
+
+    demo.load(_reveal_admin, None, admin_tab)
+    demo.load(_usage_stats, None, usage_md)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
