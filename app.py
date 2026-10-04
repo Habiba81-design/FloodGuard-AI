@@ -495,6 +495,109 @@ def _alerts_table():
 # Automatic rainfall fetch (Open-Meteo, free, no API key or signup needed)
 # and the forward-looking forecast check that ties everything together.
 # ---------------------------------------------------------------------------
+_METEO_CACHE = {}
+
+
+def _meteo_json(url, ttl=1800, timeout=10, retries=3, headers=None):
+    """Fetch a weather-API URL as JSON, politely. Results are cached for
+    `ttl` seconds so repeated checks of the same place do not hit the free
+    API again, 'Too Many Requests' (429) and server errors are retried with a
+    short wait, and if the API still refuses, an older cached copy is used
+    rather than failing. Raises only if there is nothing to fall back on."""
+    now = time_module.time()
+    cached = _METEO_CACHE.get(url)
+    if cached and now - cached[0] < ttl:
+        return cached[1]
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.load(resp)
+            if len(_METEO_CACHE) > 500:
+                _METEO_CACHE.clear()
+            _METEO_CACHE[url] = (now, data)
+            return data
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code != 429 and e.code < 500:
+                break
+        except Exception as e:
+            last_err = e
+        if attempt < retries - 1:
+            time_module.sleep(2 * (attempt + 1))
+    if cached:
+        return cached[1]  # stale is better than nothing
+    raise last_err
+
+
+def _metno_user_agent():
+    """MET Norway requires a User-Agent naming the app plus a contact point.
+    Set WEATHER_USER_AGENT on Render (e.g. 'FloodGuardAI/1.0 you@example.com')."""
+    custom = os.environ.get("WEATHER_USER_AGENT", "").strip()
+    if custom:
+        return custom
+    contact = os.environ.get("ALERT_FROM_EMAIL", "").strip() or "no-contact-set"
+    return f"FloodGuardAI/1.0 {contact}"
+
+
+def _hourly_precip_openmeteo(lat, lon, days):
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation",
+        "forecast_days": days,
+        "timezone": "auto",
+    }
+    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
+    data = _meteo_json(url, retries=1)
+    times = data.get("hourly", {}).get("time", [])
+    values = data.get("hourly", {}).get("precipitation", [])
+    if not times or not values:
+        raise RuntimeError("No forecast data returned by the weather API.")
+    return times, values, data.get("utc_offset_seconds", 0) or 0
+
+
+def _hourly_precip_metno(lat, lon, days):
+    """Backup forecast from MET Norway (free, no key, worldwide). Hourly
+    values for roughly the first 2.5 days, then 6-hour totals that are spread
+    evenly across their hours. Times are converted to the place's approximate
+    local time (from its longitude)."""
+    url = ("https://api.met.no/weatherapi/locationforecast/2.0/compact?"
+           + urllib.parse.urlencode({"lat": round(lat, 4), "lon": round(lon, 4)}))
+    data = _meteo_json(url, retries=2, headers={"User-Agent": _metno_user_agent()})
+    series = data.get("properties", {}).get("timeseries", [])
+    hourly = {}
+    for entry in series:
+        t = datetime.strptime(entry["time"], "%Y-%m-%dT%H:%M:%SZ")
+        d = entry.get("data", {})
+        if "next_1_hours" in d:
+            hourly[t] = d["next_1_hours"].get("details", {}).get("precipitation_amount") or 0
+        elif "next_6_hours" in d:
+            amount = d["next_6_hours"].get("details", {}).get("precipitation_amount") or 0
+            for k in range(6):
+                hourly.setdefault(t + timedelta(hours=k), amount / 6)
+    if not hourly:
+        raise RuntimeError("No forecast data returned by the backup weather service.")
+    offset_s = int(round(lon / 15.0)) * 3600
+    keys = sorted(hourly)[: days * 24]
+    times = [(k + timedelta(seconds=offset_s)).strftime("%Y-%m-%dT%H:00") for k in keys]
+    return times, [hourly[k] for k in keys], offset_s
+
+
+def _hourly_precip(lat, lon, days=5):
+    """Hourly rain forecast as (times, values, utc_offset_seconds). Uses
+    Open-Meteo first; if it refuses (for example 'Too Many Requests'), falls
+    back to MET Norway so the app keeps working."""
+    try:
+        return _hourly_precip_openmeteo(lat, lon, days)
+    except Exception as e1:
+        try:
+            return _hourly_precip_metno(lat, lon, days)
+        except Exception as e2:
+            raise RuntimeError(f"{e1} (backup service also failed: {e2})")
+
+
 def _fetch_forecast_rainfall_mm(lat, lon):
     """Rainfall FORECAST for the next 24 hours starting from right now, at
     these coordinates. This looks forward, not backward, so an alert means
@@ -511,25 +614,11 @@ def _fetch_forecast_rainfall_mm(lat, lon):
     Works anywhere: the forecast is requested in the place's own local
     timezone and the current hour is worked out from its UTC offset.
     """
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "precipitation",
-        "forecast_days": 3,
-        "timezone": "auto",
-    }
-    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
-        times = data.get("hourly", {}).get("time", [])
-        values = data.get("hourly", {}).get("precipitation", [])
-        if not times or not values:
-            return None, None, None, "No forecast data returned by the weather API.", {}
+        times, values, offset_s = _hourly_precip(lat, lon)
 
-        # Forecast times are in the place's own local time ("timezone=auto"),
-        # so shift the server's UTC clock by the place's UTC offset.
-        offset_s = data.get("utc_offset_seconds", 0) or 0
+        # Forecast times are in the place's own local time, so shift the
+        # server's UTC clock by the place's UTC offset.
         current_hour = (datetime.utcnow() + timedelta(seconds=offset_s)).strftime("%Y-%m-%dT%H:00")
         try:
             start = times.index(current_hour)
@@ -593,8 +682,7 @@ def _fetch_river_water_level(lat, lon):
     }
     url = "https://flood-api.open-meteo.com/v1/flood?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
+        data = _meteo_json(url, retries=1)
         values = data.get("daily", {}).get("river_discharge", [])
         values = [v for v in values if v is not None]
         if len(values) < 2:
@@ -806,23 +894,8 @@ def _find_next_heavy_rain(lat, lon, days=5):
     Returns (result_dict, error). result_dict has found=True with the start,
     end, peak hour, 24h total and hours until it starts, or found=False with
     the next 24 hours' total. Never raises."""
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "precipitation",
-        "forecast_days": days,
-        "timezone": "auto",
-    }
-    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
-        times = data.get("hourly", {}).get("time", [])
-        values = data.get("hourly", {}).get("precipitation", [])
-        if not times or not values:
-            return None, "No forecast data returned by the weather API."
-
-        offset_s = data.get("utc_offset_seconds", 0) or 0
+        times, values, offset_s = _hourly_precip(lat, lon, days)
         local_now = datetime.utcnow() + timedelta(seconds=offset_s)
         current_hour = local_now.strftime("%Y-%m-%dT%H:00")
         try:
@@ -852,6 +925,8 @@ def _find_next_heavy_rain(lat, lon, days=5):
                 }, None
         return {"found": False, "next24_mm": round(sum(vals[start:start + 24]), 1)}, None
     except Exception as e:
+        if "429" in str(e):
+            return None, "The weather service is busy right now. Please wait a minute and try again."
         return None, str(e)
 
 
@@ -982,9 +1057,9 @@ def admin_show_alerts_sent(password):
 def run_check_now(password):
     ok, err = _check_admin_password(password)
     if not ok:
-        return err, _alerts_table()
+        return err
     summary = run_scheduled_check()
-    return f"Ran the check manually just now.\n\n{summary}", _alerts_table()
+    return f"Ran the check manually just now.\n\n{summary}"
 
 
 # ---------------------------------------------------------------------------
@@ -1185,20 +1260,6 @@ def stop_alerts(channel, contact):
     return f"Done. **{value}** has been removed from {removed} alert subscription(s)."
 
 
-def clear_dashboard_and_alerts(password):
-    """Admin only: wipes every stored reading and every raised alert, so the
-    'Alerts raised' table starts empty.
-    Contacts and water levels are not touched."""
-    ok, err = _check_admin_password(password)
-    if not ok:
-        return err, _alerts_table()
-    if not hasattr(db, "clear_readings_and_alerts"):
-        return ("db.py is missing `clear_readings_and_alerts()`. Add it to db.py first.",
-                _alerts_table())
-    db.clear_readings_and_alerts()
-    return "Cleared all risk readings and alerts.", _alerts_table()
-
-
 def _scheduler_loop():
     while True:
         try:
@@ -1382,22 +1443,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             )
             run_now_btn = gr.Button("Run check now", variant="primary")
             run_now_out = gr.Markdown()
-            run_now_alerts = gr.Dataframe(label="Alerts raised (history)", value=_alerts_table, wrap=True)
-            run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
-
-        with gr.Column():
-            gr.Markdown(
-                "### Clear dashboard and alerts\n"
-                "Deletes every stored risk reading and every raised alert. Subscribers "
-                "and the record of alerts sent are kept."
-            )
-            clear_btn = gr.Button("Clear all readings and alerts", variant="stop")
-            clear_out = gr.Markdown()
-            clear_btn.click(
-                clear_dashboard_and_alerts,
-                inputs=[admin_password],
-                outputs=[clear_out, run_now_alerts],
-            )
+            run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
