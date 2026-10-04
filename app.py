@@ -56,6 +56,11 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 import gradio as gr
+
+try:
+    import brand_assets  # link-preview image + icons, embedded as base64
+except Exception:
+    brand_assets = None
 import pandas as pd
 
 import db
@@ -1525,7 +1530,50 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hero.jpg"), 
     _hero_b64 = base64.b64encode(_f.read()).decode()
 FLOODGUARD_CSS = FLOODGUARD_CSS.replace("{HERO_IMG}", "data:image/jpeg;base64," + _hero_b64)
 
-with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", secondary_hue="amber"), css=FLOODGUARD_CSS) as demo:
+# ---------------------------------------------------------------------------
+# Link preview (WhatsApp, Facebook, X...) and home-screen icon
+# ---------------------------------------------------------------------------
+_SITE_URL = (os.environ.get("APP_URL", "").strip() or "https://floodguard-ai-1.onrender.com").rstrip("/")
+_ASSET_VERSION = "2"  # bump this number if you change the images, so apps refetch them
+
+
+def _build_brand_head():
+    if brand_assets is None:
+        return ""
+    v = _ASSET_VERSION
+    title = "FloodGuard AI"
+    desc = "Get an early warning when heavy rain could put your area at risk of flooding."
+    return (
+        f'<meta name="description" content="{desc}">'
+        f'<meta property="og:type" content="website">'
+        f'<meta property="og:site_name" content="{title}">'
+        f'<meta property="og:title" content="{title}: heavy rain and flood alerts">'
+        f'<meta property="og:description" content="{desc}">'
+        f'<meta property="og:url" content="{_SITE_URL}/">'
+        f'<meta property="og:image" content="{_SITE_URL}/og-image.jpg?v={v}">'
+        f'<meta property="og:image:type" content="image/jpeg">'
+        f'<meta property="og:image:width" content="1200">'
+        f'<meta property="og:image:height" content="630">'
+        f'<meta name="twitter:card" content="summary_large_image">'
+        f'<meta name="twitter:title" content="{title}: heavy rain and flood alerts">'
+        f'<meta name="twitter:description" content="{desc}">'
+        f'<meta name="twitter:image" content="{_SITE_URL}/og-image.jpg?v={v}">'
+        f'<meta name="theme-color" content="#0b1220">'
+        f'<link rel="icon" type="image/png" href="/favicon.png?v={v}">'
+        f'<link rel="apple-touch-icon" href="/apple-touch-icon.png?v={v}">'
+        f'<link rel="manifest" href="/manifest.webmanifest?v={v}">'
+    )
+
+
+_BLOCKS_EXTRA = {}
+try:
+    import inspect as _inspect
+    if "head" in _inspect.signature(gr.Blocks.__init__).parameters and brand_assets is not None:
+        _BLOCKS_EXTRA["head"] = _build_brand_head()
+except Exception:
+    _BLOCKS_EXTRA = {}
+
+with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", secondary_hue="amber"), css=FLOODGUARD_CSS, **_BLOCKS_EXTRA) as demo:
     with gr.Column(elem_classes="fg-hero"):
         gr.Markdown(
             "# 🌊 FloodGuard AI\n"
@@ -1636,6 +1684,74 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
     demo.load(_reveal_admin, None, admin_tab)
     demo.load(_usage_stats, None, usage_md)
 
+def _branded_launch(port):
+    """Serve the brand images (link preview, icons, manifest) next to the app.
+    If anything about this fails, fall back to a plain launch so the app
+    always starts."""
+    if brand_assets is None:
+        demo.launch(server_name="0.0.0.0", server_port=port)
+        return
+    try:
+        import tempfile
+        import inspect
+        import uvicorn
+        from fastapi import FastAPI
+        from fastapi.responses import Response
+
+        def _b(data):
+            return base64.b64decode(data)
+
+        og = _b(brand_assets.OG_IMAGE_JPG)
+        i512 = _b(brand_assets.ICON_512_PNG)
+        i192 = _b(brand_assets.ICON_192_PNG)
+        touch = _b(brand_assets.APPLE_TOUCH_ICON_PNG)
+        fav = _b(brand_assets.FAVICON_PNG)
+        manifest = json.dumps({
+            "name": "FloodGuard AI",
+            "short_name": "FloodGuard",
+            "description": "Heavy rain and flood alerts for your area.",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#0b1220",
+            "theme_color": "#0b1220",
+            "icons": [
+                {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            ],
+        }).encode()
+
+        api = FastAPI()
+
+        def _route(path, data, mime):
+            def handler():
+                return Response(content=data, media_type=mime,
+                                headers={"Cache-Control": "public, max-age=86400"})
+            api.add_api_route(path, handler, methods=["GET"], include_in_schema=False)
+
+        _route("/og-image.jpg", og, "image/jpeg")
+        _route("/icon-512.png", i512, "image/png")
+        _route("/icon-192.png", i192, "image/png")
+        _route("/apple-touch-icon.png", touch, "image/png")
+        _route("/apple-touch-icon-precomposed.png", touch, "image/png")
+        _route("/favicon.png", fav, "image/png")
+        _route("/favicon.ico", fav, "image/png")
+        _route("/manifest.webmanifest", manifest, "application/manifest+json")
+
+        kwargs = {}
+        if "favicon_path" in inspect.signature(gr.mount_gradio_app).parameters:
+            fav_path = os.path.join(tempfile.gettempdir(), "floodguard_favicon.png")
+            with open(fav_path, "wb") as f:
+                f.write(fav)
+            kwargs["favicon_path"] = fav_path
+        app = gr.mount_gradio_app(api, demo, path="/", **kwargs)
+        uvicorn.run(app, host="0.0.0.0", port=port)
+    except Exception as e:
+        print(f"Branded launch failed ({e}); starting normally.", flush=True)
+        demo.launch(server_name="0.0.0.0", server_port=port)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    _branded_launch(port)
