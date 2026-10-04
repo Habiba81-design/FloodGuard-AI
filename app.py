@@ -498,7 +498,7 @@ def _alerts_table():
 _METEO_CACHE = {}
 
 
-def _meteo_json(url, ttl=1800, timeout=10, retries=3):
+def _meteo_json(url, ttl=1800, timeout=10, retries=3, headers=None):
     """Fetch a weather-API URL as JSON, politely. Results are cached for
     `ttl` seconds so repeated checks of the same place do not hit the free
     API again, 'Too Many Requests' (429) and server errors are retried with a
@@ -511,7 +511,8 @@ def _meteo_json(url, ttl=1800, timeout=10, retries=3):
     last_err = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
+            req = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.load(resp)
             if len(_METEO_CACHE) > 500:
                 _METEO_CACHE.clear()
@@ -530,6 +531,73 @@ def _meteo_json(url, ttl=1800, timeout=10, retries=3):
     raise last_err
 
 
+def _metno_user_agent():
+    """MET Norway requires a User-Agent naming the app plus a contact point.
+    Set WEATHER_USER_AGENT on Render (e.g. 'FloodGuardAI/1.0 you@example.com')."""
+    custom = os.environ.get("WEATHER_USER_AGENT", "").strip()
+    if custom:
+        return custom
+    contact = os.environ.get("ALERT_FROM_EMAIL", "").strip() or "no-contact-set"
+    return f"FloodGuardAI/1.0 {contact}"
+
+
+def _hourly_precip_openmeteo(lat, lon, days):
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation",
+        "forecast_days": days,
+        "timezone": "auto",
+    }
+    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
+    data = _meteo_json(url, retries=1)
+    times = data.get("hourly", {}).get("time", [])
+    values = data.get("hourly", {}).get("precipitation", [])
+    if not times or not values:
+        raise RuntimeError("No forecast data returned by the weather API.")
+    return times, values, data.get("utc_offset_seconds", 0) or 0
+
+
+def _hourly_precip_metno(lat, lon, days):
+    """Backup forecast from MET Norway (free, no key, worldwide). Hourly
+    values for roughly the first 2.5 days, then 6-hour totals that are spread
+    evenly across their hours. Times are converted to the place's approximate
+    local time (from its longitude)."""
+    url = ("https://api.met.no/weatherapi/locationforecast/2.0/compact?"
+           + urllib.parse.urlencode({"lat": round(lat, 4), "lon": round(lon, 4)}))
+    data = _meteo_json(url, retries=2, headers={"User-Agent": _metno_user_agent()})
+    series = data.get("properties", {}).get("timeseries", [])
+    hourly = {}
+    for entry in series:
+        t = datetime.strptime(entry["time"], "%Y-%m-%dT%H:%M:%SZ")
+        d = entry.get("data", {})
+        if "next_1_hours" in d:
+            hourly[t] = d["next_1_hours"].get("details", {}).get("precipitation_amount") or 0
+        elif "next_6_hours" in d:
+            amount = d["next_6_hours"].get("details", {}).get("precipitation_amount") or 0
+            for k in range(6):
+                hourly.setdefault(t + timedelta(hours=k), amount / 6)
+    if not hourly:
+        raise RuntimeError("No forecast data returned by the backup weather service.")
+    offset_s = int(round(lon / 15.0)) * 3600
+    keys = sorted(hourly)[: days * 24]
+    times = [(k + timedelta(seconds=offset_s)).strftime("%Y-%m-%dT%H:00") for k in keys]
+    return times, [hourly[k] for k in keys], offset_s
+
+
+def _hourly_precip(lat, lon, days=5):
+    """Hourly rain forecast as (times, values, utc_offset_seconds). Uses
+    Open-Meteo first; if it refuses (for example 'Too Many Requests'), falls
+    back to MET Norway so the app keeps working."""
+    try:
+        return _hourly_precip_openmeteo(lat, lon, days)
+    except Exception as e1:
+        try:
+            return _hourly_precip_metno(lat, lon, days)
+        except Exception as e2:
+            raise RuntimeError(f"{e1} (backup service also failed: {e2})")
+
+
 def _fetch_forecast_rainfall_mm(lat, lon):
     """Rainfall FORECAST for the next 24 hours starting from right now, at
     these coordinates. This looks forward, not backward, so an alert means
@@ -546,24 +614,11 @@ def _fetch_forecast_rainfall_mm(lat, lon):
     Works anywhere: the forecast is requested in the place's own local
     timezone and the current hour is worked out from its UTC offset.
     """
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "precipitation",
-        "forecast_days": 3,
-        "timezone": "auto",
-    }
-    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
-        data = _meteo_json(url)
-        times = data.get("hourly", {}).get("time", [])
-        values = data.get("hourly", {}).get("precipitation", [])
-        if not times or not values:
-            return None, None, None, "No forecast data returned by the weather API.", {}
+        times, values, offset_s = _hourly_precip(lat, lon)
 
-        # Forecast times are in the place's own local time ("timezone=auto"),
-        # so shift the server's UTC clock by the place's UTC offset.
-        offset_s = data.get("utc_offset_seconds", 0) or 0
+        # Forecast times are in the place's own local time, so shift the
+        # server's UTC clock by the place's UTC offset.
         current_hour = (datetime.utcnow() + timedelta(seconds=offset_s)).strftime("%Y-%m-%dT%H:00")
         try:
             start = times.index(current_hour)
@@ -627,7 +682,7 @@ def _fetch_river_water_level(lat, lon):
     }
     url = "https://flood-api.open-meteo.com/v1/flood?" + urllib.parse.urlencode(params)
     try:
-        data = _meteo_json(url)
+        data = _meteo_json(url, retries=1)
         values = data.get("daily", {}).get("river_discharge", [])
         values = [v for v in values if v is not None]
         if len(values) < 2:
@@ -839,22 +894,8 @@ def _find_next_heavy_rain(lat, lon, days=5):
     Returns (result_dict, error). result_dict has found=True with the start,
     end, peak hour, 24h total and hours until it starts, or found=False with
     the next 24 hours' total. Never raises."""
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "precipitation",
-        "forecast_days": days,
-        "timezone": "auto",
-    }
-    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
-        data = _meteo_json(url)
-        times = data.get("hourly", {}).get("time", [])
-        values = data.get("hourly", {}).get("precipitation", [])
-        if not times or not values:
-            return None, "No forecast data returned by the weather API."
-
-        offset_s = data.get("utc_offset_seconds", 0) or 0
+        times, values, offset_s = _hourly_precip(lat, lon, days)
         local_now = datetime.utcnow() + timedelta(seconds=offset_s)
         current_hour = local_now.strftime("%Y-%m-%dT%H:00")
         try:
