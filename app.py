@@ -906,31 +906,31 @@ def _dashboard_table():
 # UI
 # ---------------------------------------------------------------------------
 FLOODGUARD_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&display=swap');
-
 :root {
     --fg-deep: #0B3D3F;
     --fg-mid: #0F6466;
     --fg-accent: #14919B;
 }
 
-.gradio-container, h1, h2, h3, .prose h1, .prose h2, .prose h3 {
-    font-family: 'Space Grotesk', sans-serif !important;
+.gradio-container, h1, h2, h3, .prose h1, .prose h2, .prose h3, body, button, input, textarea {
+    font-family: Arial, Helvetica, sans-serif !important;
     letter-spacing: -0.01em;
 }
 
-/* --- Hero banner: big header + background, "one page website" feel --- */
+/* --- Hero banner: real photo background (river/water, licensed free to use
+   on Unsplash, https://unsplash.com/photos/aEzm7Gb37a4), with a dark
+   gradient overlay so the white text stays readable over it --- */
 .fg-hero {
     position: relative;
     padding: 34px 26px 26px 26px !important;
     margin: -8px -8px 22px -8px !important;
     border-radius: 0 0 22px 22px;
     background:
-        linear-gradient(135deg, var(--fg-deep) 0%, var(--fg-mid) 55%, var(--fg-accent) 100%),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120' preserveAspectRatio='none'%3E%3Cpath d='M0,40 C300,100 900,0 1200,60 L1200,120 L0,120 Z' fill='rgba(255,255,255,0.07)'/%3E%3Cpath d='M0,70 C300,20 900,110 1200,50 L1200,120 L0,120 Z' fill='rgba(255,255,255,0.05)'/%3E%3C/svg%3E");
+        linear-gradient(135deg, rgba(11,61,63,0.82) 0%, rgba(15,100,102,0.78) 55%, rgba(20,145,155,0.65) 100%),
+        url("https://images.unsplash.com/photo-1575397283492-fde3e31e31f8?fm=jpg&q=70&w=1600&auto=format&fit=crop");
     background-blend-mode: normal;
     background-size: cover;
-    background-position: bottom;
+    background-position: center;
     box-shadow: 0 8px 22px rgba(11,61,63,0.28);
 }
 .fg-hero h1 {
@@ -995,17 +995,16 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         )
 
     with gr.Tab("Check My Area"):
-        with gr.Group(elem_classes="fg-card"):
-            gr.Markdown(
-                "### Check flood risk for anywhere\n"
-                "Not just the monitored communities below. This is a one-time "
-                "check: nothing is saved, and no alert is sent."
-            )
-            with gr.Row():
-                place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
-                check_btn = gr.Button("Check my risk", variant="primary")
-            place_out = gr.Markdown()
-            check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
+        gr.Markdown(
+            "### Check flood risk for anywhere\n"
+            "Not just the monitored communities below. This is a one-time "
+            "check: nothing is saved, and no alert is sent."
+        )
+        with gr.Row():
+            place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
+            check_btn = gr.Button("Check my risk", variant="primary")
+        place_out = gr.Markdown()
+        check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
 
     with gr.Tab("Community Risk Dashboard"):
         with gr.Group(elem_classes="fg-card"):
