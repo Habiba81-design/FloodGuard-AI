@@ -1531,7 +1531,7 @@ FLOODGUARD_CSS = FLOODGUARD_CSS.replace("{HERO_IMG}", "data:image/jpeg;base64," 
 # Upload og-image.jpg and home-screen.png to your GitHub repo (next to app.py),
 # then replace YOURNAME and YOURREPO below with your GitHub username and repo
 # name (and "main" if your branch is called something else).
-_IMAGE_BASE = "https://raw.githubusercontent.com/YOURNAME/YOURREPO/main"
+_IMAGE_BASE = "https://raw.githubusercontent.com/Habiba81-design/FloodGuard-AI/main"
 _SITE_URL = (os.environ.get("APP_URL", "").strip() or "https://floodguard-ai-1.onrender.com").rstrip("/")
 _PREVIEW_IMAGE = f"{_IMAGE_BASE}/og-image.jpg"
 _HOME_IMAGE = f"{_IMAGE_BASE}/home-screen.png"
@@ -1679,4 +1679,18 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    # Newer Gradio versions take the page head and the favicon in launch().
+    # These are only added if this Gradio version accepts them, so launch()
+    # behaves exactly as before otherwise.
+    _launch_extra = {}
+    try:
+        import inspect as _inspect2
+        _launch_params = _inspect2.signature(demo.launch).parameters
+        if "head" in _launch_params and "head" not in _BLOCKS_EXTRA:
+            _launch_extra["head"] = _BRAND_HEAD
+        _fav = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home-screen.png")
+        if "favicon_path" in _launch_params and os.path.exists(_fav):
+            _launch_extra["favicon_path"] = _fav
+    except Exception:
+        _launch_extra = {}
+    demo.launch(server_name="0.0.0.0", server_port=port, **_launch_extra)
