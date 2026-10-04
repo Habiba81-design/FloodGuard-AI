@@ -723,24 +723,105 @@ def run_scheduled_check():
     return "\n".join(lines)
 
 
+def _http_json(url, headers=None, timeout=10):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)
+
+
+def _nominatim_lookup(query):
+    """OpenStreetMap search. Much better than a city database at villages,
+    hamlets and small towns, and it understands 'Village, District, Country'.
+    Returns (lat, lon, display_name) or None."""
+    params = {"q": query, "format": "jsonv2", "limit": 1, "addressdetails": 1, "accept-language": "en"}
+    url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(params)
+    ua = os.environ.get("GEOCODER_USER_AGENT", "FloodGuardAI/1.0 (flood alert service)")
+    data = _http_json(url, headers={"User-Agent": ua})
+    if not data:
+        return None
+    r = data[0]
+    addr = r.get("address", {}) or {}
+    place = (r.get("name") or addr.get("hamlet") or addr.get("village") or addr.get("suburb")
+             or addr.get("town") or addr.get("city") or addr.get("locality") or "")
+    region = addr.get("state") or addr.get("region") or addr.get("county") or addr.get("state_district") or ""
+    country = addr.get("country") or ""
+    parts = []
+    for p in (place, region, country):
+        if p and p not in parts:
+            parts.append(p)
+    display = ", ".join(parts) or r.get("display_name", query)
+    return float(r["lat"]), float(r["lon"]), display
+
+
+def _open_meteo_lookup(name, country_hint=""):
+    """Open-Meteo's geocoder (matches the place name only, so commas and
+    extra words break it). Used as a backup, with the country as a filter."""
+    params = {"name": name, "count": 10, "language": "en", "format": "json"}
+    url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(params)
+    results = _http_json(url).get("results") or []
+    if not results:
+        return None
+    if country_hint:
+        hint = country_hint.lower()
+        matching = [x for x in results if hint in (x.get("country", "") or "").lower()
+                    or hint == (x.get("country_code", "") or "").lower()]
+        results = matching or results
+    r = results[0]
+    display = ", ".join(p for p in [r.get("name"), r.get("admin1"), r.get("country")] if p)
+    return r["latitude"], r["longitude"], display
+
+
 def _geocode_place(name):
-    """Look up a place name using Open-Meteo's free Geocoding API (no key
-    needed). Returns (lat, lon, display_name, error)."""
+    """Find any place, including villages and small towns. Accepts
+    'Village, District, Country' style names or plain 'lat, lon' coordinates
+    (for places that are on no map). Returns (lat, lon, display_name, error)."""
     if not name or not name.strip():
         return None, None, None, "Type a place name first."
-    params = {"name": name.strip(), "count": 1, "language": "en", "format": "json"}
-    url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(params)
+    name = name.strip()
+
+    # 1. Exact coordinates, e.g. "9.4075, -0.8533"
+    m = re.fullmatch(r"\s*(-?\d{1,2}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*", name)
+    if m:
+        lat, lon = float(m.group(1)), float(m.group(2))
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            return lat, lon, f"Location {lat:.3f}, {lon:.3f}", None
+
+    parts = [p.strip() for p in name.split(",") if p.strip()]
+    first, last = parts[0], parts[-1]
+    country_hint = last if len(parts) > 1 else ""
+
+    # 2. Try several phrasings, most specific first, on OpenStreetMap
+    queries = [name]
+    if len(parts) > 2:
+        queries.append(f"{first}, {last}")           # drop the middle (district)
+    if len(parts) > 1:
+        queries.append(first)                         # village name alone
+    seen = set()
+    for q in queries:
+        if q in seen:
+            continue
+        seen.add(q)
+        try:
+            found = _nominatim_lookup(q)
+        except Exception:
+            found = None
+        if found:
+            return found[0], found[1], found[2], None
+        time_module.sleep(1.1)  # Nominatim allows at most 1 request per second
+
+    # 3. Backup: Open-Meteo's city database
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
-        results = data.get("results") or []
-        if not results:
-            return None, None, None, f"Could not find a place called '{name}'. Try a nearby bigger town."
-        r = results[0]
-        display = ", ".join(p for p in [r.get("name"), r.get("admin1"), r.get("country")] if p)
-        return r["latitude"], r["longitude"], display, None
-    except Exception as e:
-        return None, None, None, str(e)
+        found = _open_meteo_lookup(first, country_hint)
+        if found:
+            return found[0], found[1], found[2], None
+    except Exception:
+        pass
+
+    return None, None, None, (
+        f"Could not find '{name}'. Try the village name plus its district and country "
+        f"(for example 'Dungu, Tamale, Ghana'), a nearby bigger town, or type exact "
+        f"coordinates like 9.40, -0.85."
+    )
 
 
 def check_my_area(place_name):
@@ -1192,12 +1273,13 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
     with gr.Tab("Check & Get Alerts"):
         gr.Markdown(
             "### Check flood risk for anywhere, then get alerts\n"
-            "Type any town or area to see its flood risk for the next 24 hours. "
+            "Type any village, town or city (add the district and country for small places) "
+            "to see its flood risk for the next 24 hours. "
             "Then sign up below and we'll message you automatically when heavy "
             "rain puts your area at HIGH or CRITICAL risk."
         )
         with gr.Row():
-            place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
+            place_in = gr.Textbox(label="Place name", placeholder="Village, district, country (e.g. Dungu, Tamale, Ghana)")
             check_btn = gr.Button("Check my risk", variant="primary")
         place_out = gr.Markdown()
         check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
