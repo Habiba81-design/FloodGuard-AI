@@ -906,123 +906,196 @@ def _dashboard_table():
 # UI
 # ---------------------------------------------------------------------------
 FLOODGUARD_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap');
-h1, h2, h3, .prose h1, .prose h2, .prose h3 {
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&display=swap');
+
+:root {
+    --fg-deep: #0B3D3F;
+    --fg-mid: #0F6466;
+    --fg-accent: #14919B;
+}
+
+.gradio-container, h1, h2, h3, .prose h1, .prose h2, .prose h3 {
     font-family: 'Space Grotesk', sans-serif !important;
     letter-spacing: -0.01em;
 }
+
+/* --- Hero banner: big header + background, "one page website" feel --- */
+.fg-hero {
+    position: relative;
+    padding: 34px 26px 26px 26px !important;
+    margin: -8px -8px 22px -8px !important;
+    border-radius: 0 0 22px 22px;
+    background:
+        linear-gradient(135deg, var(--fg-deep) 0%, var(--fg-mid) 55%, var(--fg-accent) 100%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120' preserveAspectRatio='none'%3E%3Cpath d='M0,40 C300,100 900,0 1200,60 L1200,120 L0,120 Z' fill='rgba(255,255,255,0.07)'/%3E%3Cpath d='M0,70 C300,20 900,110 1200,50 L1200,120 L0,120 Z' fill='rgba(255,255,255,0.05)'/%3E%3C/svg%3E");
+    background-blend-mode: normal;
+    background-size: cover;
+    background-position: bottom;
+    box-shadow: 0 8px 22px rgba(11,61,63,0.28);
+}
+.fg-hero h1 {
+    color: #ffffff !important;
+    font-size: 2.15em !important;
+    font-weight: 800 !important;
+    margin: 0 0 8px 0 !important;
+}
+.fg-hero .prose p {
+    color: rgba(255,255,255,0.93) !important;
+    font-size: 1.02em !important;
+    max-width: 680px;
+    line-height: 1.55 !important;
+}
+
 .risk-legend {
-    display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 4px 0;
+    display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 0 0;
 }
 .risk-legend span {
-    padding: 3px 12px; border-radius: 999px; font-weight: 600; color: #fff; font-size: 0.85em;
+    padding: 4px 14px; border-radius: 999px; font-weight: 700; color: #fff; font-size: 0.8em;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+    letter-spacing: 0.02em;
+}
+
+/* --- Section cards: each tab reads as its own distinct block, like
+   sections on a one-page site, instead of one long undifferentiated form --- */
+.fg-card {
+    border: 1px solid var(--block-border-color) !important;
+    border-radius: 16px !important;
+    padding: 18px !important;
+    margin-bottom: 18px !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+}
+.fg-card h3 {
+    margin-top: 0 !important;
+    font-size: 1.12em !important;
+}
+
+/* Bigger, bolder tab labels */
+.tabs > .tab-nav button {
+    font-weight: 700 !important;
+    font-size: 1.03em !important;
 }
 """
 
 with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", secondary_hue="amber"), css=FLOODGUARD_CSS) as demo:
-    gr.Markdown(
-        "# FloodGuard AI\n"
-        "An automatic flood warning system for flood prone communities in Ghana. "
-        "It looks at the weather forecast and warns people 12 to 24 hours before "
-        "flooding happens, so they have time to prepare instead of finding out "
-        "after the flood has already started."
-    )
-    gr.HTML(
-        '<div class="risk-legend">'
-        '<span style="background:#2F9E44;">LOW</span>'
-        '<span style="background:#F2A007;">MODERATE</span>'
-        '<span style="background:#E8590C;">HIGH</span>'
-        '<span style="background:#C92A2A;">CRITICAL</span>'
-        '</div>'
-    )
+    with gr.Column(elem_classes="fg-hero"):
+        gr.Markdown(
+            "# 🌊 FloodGuard AI\n"
+            "An automatic flood warning system for flood prone communities in Ghana. "
+            "It looks at the weather forecast and warns people 12 to 24 hours before "
+            "flooding happens, so they have time to prepare instead of finding out "
+            "after the flood has already started."
+        )
+        gr.HTML(
+            '<div class="risk-legend">'
+            '<span style="background:#2F9E44;">LOW</span>'
+            '<span style="background:#F2A007;">MODERATE</span>'
+            '<span style="background:#E8590C;">HIGH</span>'
+            '<span style="background:#C92A2A;">CRITICAL</span>'
+            '</div>'
+        )
 
     with gr.Tab("Check My Area"):
-        gr.Markdown(
-            "Check flood risk for anywhere, not just the monitored communities below. "
-            "This is a one-time check: nothing is saved, and no alert is sent."
-        )
-        with gr.Row():
-            place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
-            check_btn = gr.Button("Check my risk", variant="primary")
-        place_out = gr.Markdown()
-        check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown(
+                "### Check flood risk for anywhere\n"
+                "Not just the monitored communities below. This is a one-time "
+                "check: nothing is saved, and no alert is sent."
+            )
+            with gr.Row():
+                place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
+                check_btn = gr.Button("Check my risk", variant="primary")
+            place_out = gr.Markdown()
+            check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
 
     with gr.Tab("Community Risk Dashboard"):
-        gr.Markdown(
-            "Forecast based prediction: every 6 hours the system checks the rainfall "
-            "forecast, and where a river is nearby, the current water level too, for "
-            "each community, works out the risk level, and shows it below. "
-            "Automatic alerts are sent by email/SMS whenever a community reaches "
-            "HIGH or CRITICAL risk."
-        )
-        refresh_btn = gr.Button("Refresh dashboard")
-        readings_dashboard = gr.Dataframe(label="Risk readings per community", value=_dashboard_table, wrap=True)
-        alerts_dashboard = gr.Dataframe(label="Alerts sent", value=_alerts_table, wrap=True)
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown(
+                "### How this works\n"
+                "Every 6 hours the system checks the rainfall forecast, and where "
+                "a river is nearby, the current water level too, for each "
+                "community, works out the risk level, and shows it below. "
+                "Automatic alerts are sent by email/SMS whenever a community "
+                "reaches HIGH or CRITICAL risk."
+            )
+            refresh_btn = gr.Button("Refresh dashboard")
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown("### Risk readings per community")
+            readings_dashboard = gr.Dataframe(show_label=False, value=_dashboard_table, wrap=True)
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown("### Alerts sent")
+            alerts_dashboard = gr.Dataframe(show_label=False, value=_alerts_table, wrap=True)
         refresh_btn.click(lambda: (_dashboard_table(), _alerts_table()), outputs=[readings_dashboard, alerts_dashboard])
 
     with gr.Tab("Admin"):
-        gr.Markdown(
-            "Everything here requires the admin password, set once as `ADMIN_PASSWORD` "
-            "in Render's Environment tab. This is where the community contact lists are "
-            "managed and the forecast check can be run on demand."
-        )
-        admin_password = gr.Textbox(label="Admin password", type="password")
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown(
+                "### Admin access\n"
+                "Everything on this page requires the admin password, set once "
+                "as `ADMIN_PASSWORD` in Render's Environment tab. This is where "
+                "community contact lists are managed and the forecast check can "
+                "be run on demand."
+            )
+            admin_password = gr.Textbox(label="Admin password", type="password")
 
-        gr.Markdown("### Community contact lists — import a CSV with columns: name, phone, email")
-        with gr.Row():
-            import_community = gr.Dropdown(label="Community", choices=COMMUNITIES, value="Mepe")
-            import_file = gr.File(label="Contacts CSV", file_types=[".csv"], type="filepath")
-        import_btn = gr.Button("Import contacts", variant="primary")
-        import_out = gr.Markdown()
-        contact_counts = gr.Dataframe(label="Contacts per community", value=_subscriber_counts_table, wrap=True)
-        import_btn.click(
-            bulk_import_contacts,
-            inputs=[admin_password, import_community, import_file],
-            outputs=[import_out, contact_counts],
-        )
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown("### Community contact lists — import a CSV with columns: name, phone, email")
+            with gr.Row():
+                import_community = gr.Dropdown(label="Community", choices=COMMUNITIES, value="Mepe")
+                import_file = gr.File(label="Contacts CSV", file_types=[".csv"], type="filepath")
+            import_btn = gr.Button("Import contacts", variant="primary")
+            import_out = gr.Markdown()
+            contact_counts = gr.Dataframe(label="Contacts per community", value=_subscriber_counts_table, wrap=True)
+            import_btn.click(
+                bulk_import_contacts,
+                inputs=[admin_password, import_community, import_file],
+                outputs=[import_out, contact_counts],
+            )
 
-        gr.Markdown(
-            "### Water level (fallback only)\n"
-            "Water level is now fetched automatically from live river discharge data "
-            "for communities near a modelled river (Mepe, Anloga, Sokpoe). It's "
-            "overwritten by that automatic reading every check. Only use this manual "
-            "field for a community with no river nearby, like New Legon, where there "
-            "is no automatic source and flooding comes from drainage, not a river."
-        )
-        with gr.Row():
-            wl_community = gr.Dropdown(label="Community", choices=list(COMMUNITY_COORDS.keys()), value="Mepe")
-            wl_level = gr.Number(label="Water level (m)", value=0)
-        wl_btn = gr.Button("Update water level")
-        wl_out = gr.Markdown()
-        wl_table = gr.Dataframe(label="Latest water level per community", value=_water_levels_table, wrap=True)
-        wl_btn.click(update_water_level, inputs=[admin_password, wl_community, wl_level], outputs=[wl_out, wl_table])
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown(
+                "### Water level (fallback only)\n"
+                "Water level is now fetched automatically from live river discharge data "
+                "for communities near a modelled river (Mepe, Anloga, Sokpoe). It's "
+                "overwritten by that automatic reading every check. Only use this manual "
+                "field for a community with no river nearby, like New Legon, where there "
+                "is no automatic source and flooding comes from drainage, not a river."
+            )
+            with gr.Row():
+                wl_community = gr.Dropdown(label="Community", choices=list(COMMUNITY_COORDS.keys()), value="Mepe")
+                wl_level = gr.Number(label="Water level (m)", value=0)
+            wl_btn = gr.Button("Update water level")
+            wl_out = gr.Markdown()
+            wl_table = gr.Dataframe(label="Latest water level per community", value=_water_levels_table, wrap=True)
+            wl_btn.click(update_water_level, inputs=[admin_password, wl_community, wl_level], outputs=[wl_out, wl_table])
 
-        gr.Markdown(
-            "### Run the automatic forecast check now\n"
-            "Normally runs every 6 hours by itself, so real lead time stays "
-            "within about 12-24 hours before rain arrives. Use this button to "
-            "run it immediately, for testing or a demo."
-        )
-        run_now_btn = gr.Button("Run check now", variant="primary")
-        run_now_out = gr.Markdown()
-        run_now_alerts = gr.Dataframe(label="Alerts raised", wrap=True)
-        run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown(
+                "### Run the automatic forecast check now\n"
+                "Normally runs every 6 hours by itself, so real lead time stays "
+                "within about 12-24 hours before rain arrives. Use this button to "
+                "run it immediately, for testing or a demo."
+            )
+            run_now_btn = gr.Button("Run check now", variant="primary")
+            run_now_out = gr.Markdown()
+            run_now_alerts = gr.Dataframe(label="Alerts raised", wrap=True)
+            run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
 
-        gr.Markdown(
-            "### Backtest against real, documented past floods\n"
-            "Runs the exact same risk logic used live, but against REAL historical "
-            "rainfall data for two confirmed, recent flood events near New Legon: "
-            "the 18 May 2025 Accra floods (5 deaths, 3,000+ displaced, NADMO "
-            "confirmed) and the 29 June 2026 Accra floods, the most recent major "
-            "flooding in Ghana. Instead of made-up numbers, this uses real "
-            "recorded data. It calls live external APIs, so it can take a few "
-            "seconds and only works once the app is actually deployed with "
-            "network access."
-        )
-        backtest_btn = gr.Button("Run backtest")
-        backtest_out = gr.Markdown()
-        backtest_table = gr.Dataframe(label="Day by day breakdown", wrap=True)
-        backtest_btn.click(run_backtest, inputs=[admin_password], outputs=[backtest_out, backtest_table])
+        with gr.Group(elem_classes="fg-card"):
+            gr.Markdown(
+                "### Backtest against real, documented past floods\n"
+                "Runs the exact same risk logic used live, but against REAL historical "
+                "rainfall data for two confirmed, recent flood events near New Legon: "
+                "the 18 May 2025 Accra floods (5 deaths, 3,000+ displaced, NADMO "
+                "confirmed) and the 29 June 2026 Accra floods, the most recent major "
+                "flooding in Ghana. Instead of made-up numbers, this uses real "
+                "recorded data. It calls live external APIs, so it can take a few "
+                "seconds and only works once the app is actually deployed with "
+                "network access."
+            )
+            backtest_btn = gr.Button("Run backtest")
+            backtest_out = gr.Markdown()
+            backtest_table = gr.Dataframe(label="Day by day breakdown", wrap=True)
+            backtest_btn.click(run_backtest, inputs=[admin_password], outputs=[backtest_out, backtest_table])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
