@@ -316,6 +316,121 @@ def _STOP_FOOTER(unsub_url=""):
     return f"\n\nTo stop getting these alerts, open this private link: {unsub_url}"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Rain strength: light / moderate / heavy
+# ---------------------------------------------------------------------------
+_INTENSITY_RANK = {"light": 1, "moderate": 2, "heavy": 3}
+_RAIN_FEEL = {"light": "drizzle or gentle rain", "moderate": "steady rain", "heavy": "intense rain"}
+_RAIN_MEANING = {
+    "light": (
+        "Only light rain is expected. It is unlikely to cause problems by itself, but "
+        "roads can get wet and slippery and anything left outside may get damp."
+    ),
+    "moderate": (
+        "Steady rain is expected. It can make travel and outdoor work difficult, and "
+        "water may gather on low roads and around drains."
+    ),
+    "heavy": (
+        "The rain forecast is heavy enough to be worth preparing for, even though the "
+        "flood risk is not high right now. Plan your schedule and protect your "
+        "belongings before it starts."
+    ),
+}
+
+
+def _rain_intensity(peak_mm_h, total_mm):
+    """Classify a spell of rain as 'light', 'moderate' or 'heavy' from its
+    strongest single hour and its 24 hour total. Returns None when there is
+    too little rain to be worth mentioning.
+
+    heavy    : at least RAIN_ALERT_PEAK_MM_H in one hour, or RAIN_ALERT_MM in 24h
+    moderate : at least RAIN_MODERATE_MM_H in one hour, or RAIN_MODERATE_TOTAL_MM in 24h
+    light    : anything else that still adds up to RAIN_MIN_TOTAL_MM
+    """
+    peak = float(peak_mm_h or 0)
+    total = float(total_mm or 0)
+    if total < RAIN_MIN_TOTAL_MM:
+        return None
+    if peak >= RAIN_ALERT_PEAK_MM_H or total >= RAIN_ALERT_MM:
+        return "heavy"
+    if peak >= RAIN_MODERATE_MM_H or total >= RAIN_MODERATE_TOTAL_MM:
+        return "moderate"
+    return "light"
+
+
+def _intensity_badge_html(intensity):
+    """A small blue pill for light / moderate / heavy rain (blues, so it is
+    not confused with the green-to-red flood risk pills)."""
+    colors = {"light": "#4DABF7", "moderate": "#1C7ED6", "heavy": "#5F3DC4"}
+    color = colors.get(intensity, "#666")
+    return (
+        f'<span style="display:inline-block;padding:3px 12px;border-radius:999px;'
+        f'font-weight:600;color:#fff;background:{color};">{(intensity or "").upper()}</span>'
+    )
+
+
+def _mm(x):
+    """Rainfall for people: whole numbers when large, one decimal when small."""
+    x = float(x or 0)
+    return f"{x:.0f}" if x >= 10 else f"{x:.1f}"
+
+
+def _rain_steps(level, intensity="heavy"):
+    """Advice for a rain alert where flood risk is only LOW or MODERATE,
+    matched to how strong the rain is."""
+    if intensity == "light":
+        steps = [
+            "Carry an umbrella or raincoat if you go out, and take care on wet, slippery roads.",
+            "Normal activities can go on, but bring in washing and cover anything that must stay dry.",
+        ]
+    elif intensity == "moderate":
+        steps = [
+            "Plan your day around the rain: travel, market trips and farm work may be wet and slow.",
+            "Cover or bring in washing, grain, stock and anything that must stay dry.",
+            "Keep clear of streams, drains and river banks, and watch for water gathering on low roads.",
+        ]
+    else:
+        steps = [
+            "Review your schedule: postpone travel, market trips and farm work during the rain if you can.",
+            "Keep clear of streams, drains, river banks and low-lying roads while it falls.",
+        ]
+    if level == "MODERATE":
+        steps.append("Flood chance is MODERATE: move documents, electronics, food stock and farm inputs off the floor or to higher ground now.")
+    elif intensity != "light":
+        steps.append("Flood chance is LOW for now, but stay alert in case it changes, and keep valuables off the floor.")
+    if intensity != "light":
+        steps += [
+            "Keep your phone charged so you can receive updates.",
+            "Never walk or drive through flood water. Tell your family and neighbours.",
+        ]
+    return steps
+
+
+def _rain_summary_text(rainfall_mm, window_start, window_end, info):
+    """One-sentence rainfall summary: how much, how hard, and when."""
+    info = info or {}
+    if rainfall_mm is None:
+        return "Rainfall details are not available right now."
+    text = f"about {rainfall_mm:.0f} mm in the next 24 hours"
+    peak = info.get("peak_mm_h")
+    if peak and peak >= 1:
+        text += f" (up to {peak:.0f} mm in one hour)"
+    if window_start:
+        if info.get("raining_now"):
+            if window_end and window_end != window_start:
+                text += f", rain is falling now and is expected to last until about {window_end}"
+            else:
+                text += ", rain is falling now"
+        else:
+            when = f"between {window_start} and {window_end}" if window_end and window_end != window_start else f"around {window_start}"
+            hours = info.get("hours_until")
+            lead = f", starting in about {hours} hour{'s' if hours != 1 else ''}" if hours is not None and hours > 0 else ", starting very soon"
+            text += f", expected {when}{lead}"
+    return text + "."
+
+
 def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
                               forecast=False, window_start=None, window_end=None,
                               info=None, flood_alert=True, water_tracked=True, unsub_url=""):
