@@ -1562,13 +1562,11 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
 
         gr.Markdown(
             "### Get alerts for this place\n"
-            "Use the same place name as above. Alerts are sent by email, from anywhere. We'll send a code to confirm it's you."
+            "Use the same place name as above. SMS is available for Ghana phone numbers; email works from anywhere. We'll send a code to confirm it's you."
         )
         with gr.Row():
-            # SMS is switched off for now: sign-up is email only. To bring SMS back,
-            # change this to gr.Radio(["SMS", "Email"], value="SMS", label="Send alerts by").
-            su_channel = gr.Radio(["Email"], value="Email", label="Send alerts by", visible=False)
-            su_contact = gr.Textbox(label="Email address", placeholder="you@example.com")
+            su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Send alerts by")
+            su_contact = gr.Textbox(label="Phone number or email", placeholder="Ghana phone (0201234567) or any email")
         su_consent = gr.Checkbox(label=f"I agree to receive {_ALERT_WORD} and flood alerts for this place. I can stop any time.")
         su_send_btn = gr.Button("Send me a code", variant="primary")
         su_send_out = gr.Markdown()
