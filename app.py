@@ -982,9 +982,9 @@ def admin_show_alerts_sent(password):
 def run_check_now(password):
     ok, err = _check_admin_password(password)
     if not ok:
-        return err, _alerts_table()
+        return err
     summary = run_scheduled_check()
-    return f"Ran the check manually just now.\n\n{summary}", _alerts_table()
+    return f"Ran the check manually just now.\n\n{summary}"
 
 
 # ---------------------------------------------------------------------------
@@ -1185,20 +1185,6 @@ def stop_alerts(channel, contact):
     return f"Done. **{value}** has been removed from {removed} alert subscription(s)."
 
 
-def clear_dashboard_and_alerts(password):
-    """Admin only: wipes every stored reading and every raised alert, so the
-    'Alerts raised' table starts empty.
-    Contacts and water levels are not touched."""
-    ok, err = _check_admin_password(password)
-    if not ok:
-        return err, _alerts_table()
-    if not hasattr(db, "clear_readings_and_alerts"):
-        return ("db.py is missing `clear_readings_and_alerts()`. Add it to db.py first.",
-                _alerts_table())
-    db.clear_readings_and_alerts()
-    return "Cleared all risk readings and alerts.", _alerts_table()
-
-
 def _scheduler_loop():
     while True:
         try:
@@ -1382,22 +1368,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             )
             run_now_btn = gr.Button("Run check now", variant="primary")
             run_now_out = gr.Markdown()
-            run_now_alerts = gr.Dataframe(label="Alerts raised (history)", value=_alerts_table, wrap=True)
-            run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out, run_now_alerts])
-
-        with gr.Column():
-            gr.Markdown(
-                "### Clear dashboard and alerts\n"
-                "Deletes every stored risk reading and every raised alert. Subscribers "
-                "and the record of alerts sent are kept."
-            )
-            clear_btn = gr.Button("Clear all readings and alerts", variant="stop")
-            clear_out = gr.Markdown()
-            clear_btn.click(
-                clear_dashboard_and_alerts,
-                inputs=[admin_password],
-                outputs=[clear_out, run_now_alerts],
-            )
+            run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
