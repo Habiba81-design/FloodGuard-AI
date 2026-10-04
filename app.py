@@ -1184,7 +1184,10 @@ def _subscribers_table():
     return pd.DataFrame(out, columns=cols)
 
 
-def admin_show_subscribers():
+def admin_show_subscribers(password):
+    ok, err = _check_admin_password(password)
+    if not ok:
+        return err, _subscribers_table_empty()
     try:
         table = _subscribers_table()
     except Exception as e:
@@ -1207,7 +1210,10 @@ def _deliveries_table_empty():
                                  "channel", "recipient", "status", "detail"])
 
 
-def admin_show_alerts_sent():
+def admin_show_alerts_sent(password):
+    ok, err = _check_admin_password(password)
+    if not ok:
+        return err, _deliveries_table_empty()
     try:
         rows = db.get_deliveries()
     except Exception as e:
@@ -1562,55 +1568,39 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             stop_out = gr.Markdown()
             stop_btn.click(stop_alerts, inputs=[stop_channel, stop_contact], outputs=stop_out)
 
-    # The Records tab is hidden from subscribers. It only appears for whoever
-    # opens the site with ?records=<RECORDS_KEY> at the end of the link, where
-    # RECORDS_KEY is a long secret set on Render. If RECORDS_KEY is not set,
-    # the tab never appears. No password is needed to view subscribers and
-    # alerts sent, but "Run check now" sends real messages, so it still
-    # needs the admin password.
-    with gr.Tab("Records", visible=False) as admin_tab:
+    # The Admin tab is visible to everyone, but every action in it (viewing
+    # subscribers, viewing alerts sent, running a check) needs ADMIN_PASSWORD.
+    with gr.Tab("Admin"):
         with gr.Column():
             gr.Markdown(
-                "### Records\n"
-                "Who has subscribed and which alerts were sent."
+                "### Admin\n"
+                "Who has subscribed and which alerts were sent. Enter the admin password to use anything on this tab."
             )
+            admin_password = gr.Textbox(label="Admin password", type="password")
 
         with gr.Column():
             gr.Markdown("### Subscribers\nEveryone who signed up for alerts, with when they joined.")
             subs_btn = gr.Button("Show subscribers", variant="primary")
             subs_out = gr.Markdown()
             subs_table = gr.Dataframe(label="Subscribers", value=_subscribers_table_empty, wrap=True)
-            subs_btn.click(admin_show_subscribers, inputs=None, outputs=[subs_out, subs_table])
+            subs_btn.click(admin_show_subscribers, inputs=[admin_password], outputs=[subs_out, subs_table])
 
         with gr.Column():
             gr.Markdown("### Alerts sent\nEvery rain or flood alert sent to a subscriber, and whether it was delivered.")
             sent_btn = gr.Button("Show alerts sent", variant="primary")
             sent_out = gr.Markdown()
             sent_table = gr.Dataframe(label="Alerts sent", value=_deliveries_table_empty, wrap=True)
-            sent_btn.click(admin_show_alerts_sent, inputs=None, outputs=[sent_out, sent_table])
+            sent_btn.click(admin_show_alerts_sent, inputs=[admin_password], outputs=[sent_out, sent_table])
 
         with gr.Column():
             gr.Markdown(
                 "### Run the automatic forecast check now (owner only)\n"
                 "Normally runs every 6 hours by itself. This sends real alerts to "
-                "subscribers when the rules are met, so it needs the admin password."
+                "subscribers when the rules are met."
             )
-            admin_password = gr.Textbox(label="Admin password", type="password")
             run_now_btn = gr.Button("Run check now")
             run_now_out = gr.Markdown()
             run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out])
-
-    def _reveal_admin(request: gr.Request):
-        show = False
-        try:
-            key = os.environ.get("RECORDS_KEY", "").strip()
-            given = (request.query_params.get("records") or "").strip()
-            show = bool(key) and secrets.compare_digest(given, key)
-        except Exception:
-            pass
-        return gr.update(visible=show)
-
-    demo.load(_reveal_admin, None, admin_tab)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
