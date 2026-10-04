@@ -90,21 +90,6 @@ COMMUNITY_COORDS = {
     "Sokpoe": (5.95, 0.62),
     "New Legon": (5.680, -0.170),
 }
-COMMUNITIES = list(COMMUNITY_COORDS.keys()) + ["All communities"]
-
-
-def _subscriber_counts_table():
-    rows = db.subscriber_counts()
-    if not rows:
-        return pd.DataFrame(columns=["community", "contacts"])
-    return pd.DataFrame(rows)
-
-
-def _water_levels_table():
-    latest = db.get_water_levels()
-    rows = [{"community": c, "last_reported_water_level_m": latest.get(c, "not yet set")}
-            for c in COMMUNITY_COORDS]
-    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -126,62 +111,6 @@ def _check_admin_password(password):
     if not secrets.compare_digest(password or "", real):
         return False, "Incorrect admin password."
     return True, None
-
-
-def bulk_import_contacts(password, community, file):
-    ok, err = _check_admin_password(password)
-    if not ok:
-        return err, _subscriber_counts_table()
-    if file is None:
-        return "Upload a CSV of contacts first.", _subscriber_counts_table()
-
-    try:
-        raw = pd.read_csv(file)
-    except Exception as e:
-        return f"Could not read the file as CSV: {e}", _subscriber_counts_table()
-
-    lower_cols = {c.lower().strip(): c for c in raw.columns}
-    name_col = lower_cols.get("name")
-    phone_col = lower_cols.get("phone") or lower_cols.get("phone_number") or lower_cols.get("mobile")
-    email_col = lower_cols.get("email") or lower_cols.get("email_address")
-
-    if not phone_col and not email_col:
-        return "The CSV needs at least a 'phone' or 'email' column.", _subscriber_counts_table()
-
-    added, skipped = 0, 0
-    seen_in_this_upload = set()
-    for _, row in raw.iterrows():
-        phone = str(row[phone_col]).strip() if phone_col and pd.notna(row.get(phone_col)) else ""
-        email = str(row[email_col]).strip() if email_col and pd.notna(row.get(email_col)) else ""
-        name = str(row[name_col]).strip() if name_col and pd.notna(row.get(name_col)) else ""
-        if not phone and not email:
-            skipped += 1
-            continue
-        key = (community.strip().lower(), phone, email)
-        if key in seen_in_this_upload or db.subscriber_exists(community, phone, email):
-            skipped += 1
-            continue
-        db.add_subscriber(name, community, phone, email)
-        seen_in_this_upload.add(key)
-        added += 1
-
-    return (
-        f"Imported {added} new contact(s) into **{community}** "
-        f"({skipped} skipped as duplicates or empty rows).",
-        _subscriber_counts_table(),
-    )
-
-
-def update_water_level(password, community, level):
-    ok, err = _check_admin_password(password)
-    if not ok:
-        return err, _water_levels_table()
-    db.set_water_level(community, float(level or 0))
-    return (
-        f"Updated **{community}**'s water level to {level}m. "
-        f"This is what the automatic 24h check will use until it is updated again.",
-        _water_levels_table(),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -479,17 +408,27 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
         subject = f"🌧️ Heavy rain expected in {community}{when} (flood chance: {level})"
     sms_message = _short_sms(community, level, rainfall_mm, flood_alert, info, window_start)
 
+    alert_type = "Flood alert" if flood_alert else "Heavy rain"
+
+    def _log(channel, recipient, ok, why):
+        try:
+            db.log_delivery(community, alert_type, level, channel, recipient, ok, why)
+        except Exception:
+            pass  # a logging problem must never stop an alert going out
+
     sent_email, sent_sms, failed = 0, 0, 0
     reasons = set()
     for s in targets:
         if s.get("email"):
             ok, why = _send_email(s["email"], subject, message)
+            _log("Email", s["email"], ok, why)
             sent_email += 1 if ok else 0
             failed += 0 if ok else 1
             if not ok:
                 reasons.add(f"email: {why}")
         if s.get("phone"):
             ok, why = _send_sms(s["phone"], sms_message)
+            _log("SMS", s["phone"], ok, why)
             sent_sms += 1 if ok else 0
             failed += 0 if ok else 1
             if not ok:
@@ -984,144 +923,60 @@ def check_my_area(place_name):
     )
 
 
-KNOWN_FLOOD_EVENTS = [
-    {
-        "community": "New Legon",
-        "start_date": "2025-05-17",
-        "end_date": "2025-05-19",
-        "description": (
-            "Accra floods of 18 May 2025. Real, NADMO-confirmed: 5 deaths, over "
-            "3,000 people displaced, after roughly four hours of heavy rain. "
-            "Affected areas included Adenta, Kaneshie, Okponglo and East Legon "
-            "Hills, right around New Legon. Caused by rainfall overwhelming "
-            "drainage, not a river, so this tests whether rainfall alone "
-            "correctly triggers a warning for a drainage-only location."
-        ),
-    },
-    {
-        "community": "New Legon",
-        "start_date": "2026-06-27",
-        "end_date": "2026-06-30",
-        "description": (
-            "Accra floods of 29 June 2026, the most recent major flooding in Ghana "
-            "at the time this was written. Real, widely reported: at least 10-12 "
-            "deaths, major roads submerged, drainage overwhelmed across Accra "
-            "including Adenta, Madina, Achimota and East Legon, right where New "
-            "Legon sits. GMet recorded about 333mm of rain in Accra for June 2026, "
-            "its wettest June in over a decade. Unlike Mepe, this was caused by "
-            "rainfall overwhelming drainage, not a river, so New Legon has no "
-            "automatic water level signal here, same as it has live - this "
-            "specifically tests whether rainfall alone correctly triggers a warning."
-        ),
-    },
-]
+def _subscribers_table():
+    rows = db.get_subscribers_full()
+    cols = ["subscribed_at", "place", "channel", "contact"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    out = []
+    for r in rows:
+        channel = "SMS" if r.get("phone") else "Email"
+        out.append({"subscribed_at": r["subscribed_at"], "place": r["place"],
+                    "channel": channel, "contact": r.get("phone") or r.get("email")})
+    return pd.DataFrame(out, columns=cols)
 
 
-def _fetch_historical_rainfall_daily(lat, lon, start_date, end_date):
-    """Real historical daily rainfall totals (mm) for a past date range, from
-    Open-Meteo's archive API. Returns (dates, values, error)."""
-    params = {
-        "latitude": lat, "longitude": lon,
-        "start_date": start_date, "end_date": end_date,
-        "daily": "precipitation_sum", "timezone": "Africa/Accra",
-    }
-    url = "https://archive-api.open-meteo.com/v1/archive?" + urllib.parse.urlencode(params)
-    try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            data = json.load(resp)
-        dates = data.get("daily", {}).get("time", [])
-        values = data.get("daily", {}).get("precipitation_sum", [])
-        if not dates:
-            return None, None, "No historical rainfall data returned."
-        return dates, values, None
-    except Exception as e:
-        return None, None, str(e)
-
-
-def _fetch_historical_river_discharge(lat, lon, start_date, end_date):
-    """Real historical daily river discharge (m3/s) for a past date range,
-    from Open-Meteo's Flood API (GloFAS). Returns (dates, values, error).
-    GloFAS's consolidated historical record may not reach every past date,
-    which is a genuine limitation of this free data source, not a bug -
-    reported honestly if it happens rather than silently faked."""
-    params = {
-        "latitude": lat, "longitude": lon,
-        "start_date": start_date, "end_date": end_date,
-        "daily": "river_discharge",
-    }
-    url = "https://flood-api.open-meteo.com/v1/flood?" + urllib.parse.urlencode(params)
-    try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            data = json.load(resp)
-        dates = data.get("daily", {}).get("time", [])
-        values = data.get("daily", {}).get("river_discharge", [])
-        if not dates or all(v is None for v in values):
-            return None, None, "No historical river discharge data returned for this date range."
-        return dates, values, None
-    except Exception as e:
-        return None, None, str(e)
-
-
-def run_backtest(password):
-    """Real accuracy check against a genuine, documented past flood event
-    (not a simulation): for every day of the known event window, fetch REAL
-    historical rainfall and river discharge, run them through the exact
-    same _risk_level function the live app uses, and report whether the
-    system would have flagged HIGH/CRITICAL risk at some point during the
-    event. This calls live external APIs, so it needs network access and
-    will only work once actually deployed and run, not in a local test with
-    no internet."""
+def admin_show_subscribers(password):
     ok, err = _check_admin_password(password)
     if not ok:
-        return err, pd.DataFrame()
+        return err, _subscribers_table_empty()
+    try:
+        table = _subscribers_table()
+    except Exception as e:
+        return f"Could not load subscribers: {e}", _subscribers_table_empty()
+    if table.empty:
+        return "No subscribers yet.", table
+    sms = int((table["channel"] == "SMS").sum())
+    email = int((table["channel"] == "Email").sum())
+    places = table["place"].nunique()
+    return (f"**{len(table)} subscription(s)** across **{places} place(s)**: "
+            f"{sms} by SMS, {email} by email."), table
 
-    report_lines = []
-    all_rows = []
-    for event in KNOWN_FLOOD_EVENTS:
-        community = event["community"]
-        lat, lon = COMMUNITY_COORDS[community]
-        rain_dates, rain_values, rain_err = _fetch_historical_rainfall_daily(lat, lon, event["start_date"], event["end_date"])
-        disc_dates, disc_values, disc_err = _fetch_historical_river_discharge(lat, lon, event["start_date"], event["end_date"])
 
-        if rain_err:
-            report_lines.append(f"### {community} ({event['start_date']} to {event['end_date']})\n\n"
-                                 f"Could not run this backtest: {rain_err}")
-            continue
+def _subscribers_table_empty():
+    return pd.DataFrame(columns=["subscribed_at", "place", "channel", "contact"])
 
-        disc_by_date = dict(zip(disc_dates or [], disc_values or []))
-        clean_discharge = [v for v in (disc_values or []) if v is not None]
-        baseline = sorted(clean_discharge)[len(clean_discharge) // 2] if len(clean_discharge) >= 2 else None
 
-        flagged_days, total_days = 0, 0
-        for i, date in enumerate(rain_dates):
-            rainfall_mm = rain_values[i] or 0
-            discharge = disc_by_date.get(date)
-            if discharge is not None and baseline and baseline > 0:
-                ratio = discharge / baseline
-                water_level_m = ratio * (FLOOD_WATER_THRESHOLD_M / 2)
-            else:
-                water_level_m = 0
-            level, _ = _risk_level(rainfall_mm, water_level_m, "", rainfall_label="historical (actual)")
-            total_days += 1
-            if level in ("HIGH", "CRITICAL"):
-                flagged_days += 1
-            all_rows.append({"community": community, "date": date, "rainfall_mm": rainfall_mm,
-                              "water_level_m": round(water_level_m, 2), "risk_level": level})
+def _deliveries_table_empty():
+    return pd.DataFrame(columns=["sent_at", "place", "alert_type", "risk_level",
+                                 "channel", "recipient", "status", "detail"])
 
-        accuracy_note = "no river discharge history was available for this range" if disc_err else "using real river discharge history"
-        report_lines.append(
-            f"### {community} ({event['start_date']} to {event['end_date']})\n\n"
-            f"{event['description']}\n\n"
-            f"**Result: the system would have flagged HIGH or CRITICAL risk on "
-            f"{flagged_days} of {total_days} days** during this real, confirmed flood event "
-            f"({accuracy_note}). "
-            + ("This is a real hit: the system's logic would have caught this event."
-               if flagged_days > 0 else
-               "This is a real miss: the current thresholds would NOT have caught this "
-               "event, worth investigating before relying on this system for real warnings.")
-        )
 
-    return "\n\n---\n\n".join(report_lines), pd.DataFrame(all_rows)
+def admin_show_alerts_sent(password):
+    ok, err = _check_admin_password(password)
+    if not ok:
+        return err, _deliveries_table_empty()
+    try:
+        rows = db.get_deliveries()
+    except Exception as e:
+        return f"Could not load sent alerts: {e}", _deliveries_table_empty()
+    if not rows:
+        return "No alerts have been sent yet.", _deliveries_table_empty()
+    table = pd.DataFrame(rows, columns=list(_deliveries_table_empty().columns))
+    sent = int((table["status"] == "sent").sum())
+    failed = int((table["status"] == "failed").sum())
+    return (f"**{len(table)} message(s) recorded**: {sent} sent, {failed} failed "
+            f"(showing the most recent {len(table)})."), table
 
 
 def run_check_now(password):
@@ -1220,6 +1075,49 @@ def send_signup_code(place_name, channel, contact, consent):
             f"Enter it below within 10 minutes.")
 
 
+def _welcome_info(place, lat, lon):
+    """What a new subscriber is told right after signing up: the next heavy
+    rain and the flood risk it brings, for their place. Returns a dict with
+    'summary_md' (shown on the page), 'email_text', 'sms_text' and 'level',
+    or None if the forecast could not be fetched (sign-up still succeeds)."""
+    nxt, err = _find_next_heavy_rain(lat, lon)
+    if err or not nxt:
+        return None
+    water_level_m, _ratio, _wl_err = _fetch_river_water_level(lat, lon)
+    water_level_m = water_level_m or 0.0
+    lead = f"{ALERT_LEAD_HOURS:g} hours"
+    stop = _STOP_FOOTER()
+    app_url = os.environ.get("APP_URL", "").strip()
+    sms_stop = f" Stop: {app_url}" if app_url else ""
+
+    if not nxt["found"]:
+        level, _ = _risk_level(nxt["next24_mm"], water_level_m, "", rainfall_label="forecast (next 24h)")
+        line = "No heavy rain is forecast in the next 5 days."
+        detail = f"Flood risk right now: {level}."
+        md = f"🌧️ **{line}**\n\n{detail}"
+        sms = f"FloodGuard: you're signed up for {place}. {line} Flood risk: {level}."
+    else:
+        level, _ = _risk_level(nxt["total_mm"], water_level_m, "", rainfall_label="forecast (24h from rain start)")
+        when = _hours_phrase(nxt["hours_until"])
+        window = (f"between {nxt['start']} and {nxt['end']}" if nxt["end"] != nxt["start"]
+                  else f"around {nxt['start']}")
+        line = f"Next heavy rain: {when}."
+        detail = (f"Flood risk from this rain: {level}. About {nxt['total_mm']:.0f} mm expected "
+                  f"over 24 hours, {window}.")
+        md = f"🌧️ **{line}**\n\n{detail}"
+        sms = (f"FloodGuard: you're signed up for {place}. {line} Flood risk: {level}. "
+               f"About {nxt['total_mm']:.0f} mm in 24h.")
+    sms += f" We'll alert you when heavy rain is due within {lead}." + sms_stop
+    email = (
+        f"Welcome to FloodGuard AI. You're signed up for alerts for {place}.\n\n"
+        f"{line}\n{detail}\n\n"
+        f"We check the forecast every 6 hours and will message you if heavy rain is due "
+        f"within {lead} or flood risk reaches HIGH or CRITICAL."
+        f"{stop}"
+    )
+    return {"summary_md": md, "email_text": email, "sms_text": sms, "level": level}
+
+
 def confirm_signup(channel, contact, code):
     value, err = _normalize_contact(channel, contact)
     if err:
@@ -1247,9 +1145,30 @@ def confirm_signup(channel, contact, code):
         db.delete_pending_signups(value)
     except Exception as e:
         return f"Something went wrong on our side ({e}). Please try again."
+
+    # Welcome message with the next heavy rain for this place. The sign-up is
+    # already saved, so nothing here can make it fail.
+    welcome_md, welcome_sent = "", False
+    try:
+        info = _welcome_info(place, pending["lat"], pending["lon"])
+        if info:
+            welcome_md = "\n\n" + info["summary_md"]
+            if channel == "SMS":
+                welcome_sent, why = _send_sms(value, info["sms_text"])
+            else:
+                welcome_sent, why = _send_email(value, f"Welcome to FloodGuard AI: {place}", info["email_text"])
+            try:
+                db.log_delivery(place, "Welcome", info["level"], channel, value, welcome_sent, why)
+            except Exception:
+                pass
+            if welcome_sent:
+                welcome_md += f"\n\n*We also sent this to your {'phone' if channel == 'SMS' else 'email'}.*"
+    except Exception:
+        pass
     return (f"✅ You're signed up for **{place}**. We check the forecast every 6 hours and "
             f"will message you if heavy rain is expected or flood risk there reaches HIGH or CRITICAL. "
-            f"You can stop alerts any time using 'Stop alerts' below.")
+            f"You can stop alerts any time using 'Stop alerts' below."
+            f"{welcome_md}")
 
 
 def stop_alerts(channel, contact):
@@ -1427,50 +1346,32 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             stop_out = gr.Markdown()
             stop_btn.click(stop_alerts, inputs=[stop_channel, stop_contact], outputs=stop_out)
 
-    # The Admin tab is hidden from subscribers. It only appears for whoever
-    # opens the site with ?admin=1 at the end of the link, and every action
-    # inside it still needs the admin password.
-    with gr.Tab("Admin", visible=False) as admin_tab:
+    # The Admin tab is always visible, and every action inside it still
+    # needs the admin password.
+    with gr.Tab("Admin") as admin_tab:
         with gr.Column():
             gr.Markdown(
                 "### Admin access\n"
                 "Everything on this page requires the admin password, set once "
-                "as `ADMIN_PASSWORD` in Render's Environment tab. This is where "
-                "community contact lists are managed and the forecast check can "
-                "be run on demand."
+                "as `ADMIN_PASSWORD` in Render's Environment tab. Here you can see "
+                "who has subscribed, which alerts were sent, and run the forecast "
+                "check on demand."
             )
             admin_password = gr.Textbox(label="Admin password", type="password")
 
         with gr.Column():
-            gr.Markdown("### Community contact lists — import a CSV with columns: name, phone, email")
-            with gr.Row():
-                import_community = gr.Dropdown(label="Community", choices=COMMUNITIES, value="Mepe")
-                import_file = gr.File(label="Contacts CSV", file_types=[".csv"], type="filepath")
-            import_btn = gr.Button("Import contacts", variant="primary")
-            import_out = gr.Markdown()
-            contact_counts = gr.Dataframe(label="Contacts per community", value=_subscriber_counts_table, wrap=True)
-            import_btn.click(
-                bulk_import_contacts,
-                inputs=[admin_password, import_community, import_file],
-                outputs=[import_out, contact_counts],
-            )
+            gr.Markdown("### Subscribers\nEveryone who signed up for alerts, with when they joined.")
+            subs_btn = gr.Button("Show subscribers", variant="primary")
+            subs_out = gr.Markdown()
+            subs_table = gr.Dataframe(label="Subscribers", value=_subscribers_table_empty, wrap=True)
+            subs_btn.click(admin_show_subscribers, inputs=[admin_password], outputs=[subs_out, subs_table])
 
         with gr.Column():
-            gr.Markdown(
-                "### Water level (fallback only)\n"
-                "Water level is now fetched automatically from live river discharge data "
-                "for communities near a modelled river (Mepe, Anloga, Sokpoe). It's "
-                "overwritten by that automatic reading every check. Only use this manual "
-                "field for a community with no river nearby, like New Legon, where there "
-                "is no automatic source and flooding comes from drainage, not a river."
-            )
-            with gr.Row():
-                wl_community = gr.Dropdown(label="Community", choices=list(COMMUNITY_COORDS.keys()), value="Mepe")
-                wl_level = gr.Number(label="Water level (m)", value=0)
-            wl_btn = gr.Button("Update water level")
-            wl_out = gr.Markdown()
-            wl_table = gr.Dataframe(label="Latest water level per community", value=_water_levels_table, wrap=True)
-            wl_btn.click(update_water_level, inputs=[admin_password, wl_community, wl_level], outputs=[wl_out, wl_table])
+            gr.Markdown("### Alerts sent\nEvery alert message sent to a subscriber, and whether it was delivered.")
+            sent_btn = gr.Button("Show alerts sent", variant="primary")
+            sent_out = gr.Markdown()
+            sent_table = gr.Dataframe(label="Alerts sent", value=_deliveries_table_empty, wrap=True)
+            sent_btn.click(admin_show_alerts_sent, inputs=[admin_password], outputs=[sent_out, sent_table])
 
         with gr.Column():
             gr.Markdown(
@@ -1486,26 +1387,9 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
 
         with gr.Column():
             gr.Markdown(
-                "### Backtest against real, documented past floods\n"
-                "Runs the exact same risk logic used live, but against REAL historical "
-                "rainfall data for two confirmed, recent flood events near New Legon: "
-                "the 18 May 2025 Accra floods (5 deaths, 3,000+ displaced, NADMO "
-                "confirmed) and the 29 June 2026 Accra floods, the most recent major "
-                "flooding in Ghana. Instead of made-up numbers, this uses real "
-                "recorded data. It calls live external APIs, so it can take a few "
-                "seconds and only works once the app is actually deployed with "
-                "network access."
-            )
-            backtest_btn = gr.Button("Run backtest")
-            backtest_out = gr.Markdown()
-            backtest_table = gr.Dataframe(label="Day by day breakdown", wrap=True)
-            backtest_btn.click(run_backtest, inputs=[admin_password], outputs=[backtest_out, backtest_table])
-
-        with gr.Column():
-            gr.Markdown(
                 "### Clear dashboard and alerts\n"
-                "Deletes every stored risk reading and every raised alert. Contacts "
-                "and water levels are kept."
+                "Deletes every stored risk reading and every raised alert. Subscribers "
+                "and the record of alerts sent are kept."
             )
             clear_btn = gr.Button("Clear all readings and alerts", variant="stop")
             clear_out = gr.Markdown()
@@ -1514,16 +1398,6 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
                 inputs=[admin_password],
                 outputs=[clear_out, run_now_alerts],
             )
-
-    def _reveal_admin(request: gr.Request):
-        show = False
-        try:
-            show = request.query_params.get("admin") == "1"
-        except Exception:
-            pass
-        return gr.update(visible=show)
-
-    demo.load(_reveal_admin, None, admin_tab)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))

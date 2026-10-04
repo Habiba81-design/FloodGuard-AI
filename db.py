@@ -108,6 +108,22 @@ def init_db():
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
             """)
+            # Record when each person subscribed. Existing rows get the time
+            # this line first ran, since their real sign-up time wasn't saved.
+            cur.execute("ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS alert_deliveries (
+                    id SERIAL PRIMARY KEY,
+                    sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    community TEXT,
+                    alert_type TEXT,
+                    risk_level TEXT,
+                    channel TEXT,
+                    recipient TEXT,
+                    success BOOLEAN,
+                    detail TEXT
+                );
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS seen_alert_keys (
                     community TEXT NOT NULL,
@@ -377,3 +393,42 @@ def delete_pending_signups(contact):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM pending_signups WHERE contact = %s;", (contact,))
+
+
+# ---------------------------------------------------------------------------
+# Admin records: who subscribed, and every alert message sent
+# ---------------------------------------------------------------------------
+def get_subscribers_full():
+    """Every subscriber with the time they signed up (Ghana time), newest first."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT to_char(created_at AT TIME ZONE 'Africa/Accra', 'YYYY-MM-DD HH24:MI') AS subscribed_at, "
+                "community AS place, phone, email FROM subscribers ORDER BY id DESC;"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def log_delivery(community, alert_type, risk_level, channel, recipient, success, detail):
+    """Record one alert message that was attempted (sent or failed)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO alert_deliveries (community, alert_type, risk_level, channel, "
+                "recipient, success, detail) VALUES (%s, %s, %s, %s, %s, %s, %s);",
+                (community, alert_type, risk_level, channel, recipient, bool(success), (detail or "")[:300]),
+            )
+
+
+def get_deliveries(limit=1000):
+    """The most recent alert messages, newest first (Ghana time)."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT to_char(sent_at AT TIME ZONE 'Africa/Accra', 'YYYY-MM-DD HH24:MI') AS sent_at, "
+                "community AS place, alert_type, risk_level, channel, recipient, "
+                "CASE WHEN success THEN 'sent' ELSE 'failed' END AS status, detail "
+                "FROM alert_deliveries ORDER BY id DESC LIMIT %s;",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
