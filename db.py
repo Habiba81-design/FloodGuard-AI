@@ -428,7 +428,7 @@ def get_deliveries(limit=1000):
                 "SELECT to_char(sent_at AT TIME ZONE 'Africa/Accra', 'YYYY-MM-DD HH24:MI') AS sent_at, "
                 "community AS place, alert_type, risk_level, channel, recipient, "
                 "CASE WHEN success THEN 'sent' ELSE 'failed' END AS status, detail "
-                "FROM alert_deliveries ORDER BY id DESC LIMIT %s;",
+                "FROM alert_deliveries WHERE alert_type <> 'Welcome' ORDER BY id DESC LIMIT %s;",
                 (limit,),
             )
             return [dict(r) for r in cur.fetchall()]
