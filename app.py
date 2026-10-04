@@ -23,7 +23,9 @@ Required environment variables (set on Render's Environment tab):
 Outbound alerts (optional, only active once configured):
     Email: SMTP_USER and SMTP_PASSWORD (a Gmail address and app password).
         Optionally SMTP_HOST, SMTP_PORT, ALERT_FROM_EMAIL.
-    SMS: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.
+    SMS (Ghana numbers, via Arkesel): ARKESEL_API_KEY, ARKESEL_SENDER_ID
+        (the sender name you registered with Arkesel, max 11 characters).
+    Optional: APP_URL (your app's link, shown in the 'stop alerts' text).
     Without these, contact lists and the dashboard still work, alerts are
     just logged instead of actually sent.
 
@@ -38,26 +40,22 @@ keep it awake.
 
 import json
 import os
+import re
 import secrets
 import smtplib
 import ssl
 import threading
 import time as time_module
+import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 import gradio as gr
 import pandas as pd
 
 import db
-
-try:
-    from twilio.rest import Client as TwilioClient
-    TWILIO_AVAILABLE = True
-except ImportError:
-    TWILIO_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Real Postgres-backed persistence (see db.py). Readings, alerts, contacts,
@@ -189,7 +187,7 @@ def update_water_level(password, community, level):
 # ---------------------------------------------------------------------------
 # Outbound sending. Both functions fail safely: if credentials are not set,
 # or the send fails, they return (False, reason) instead of raising, so a
-# missing SMTP or Twilio setup never crashes the app.
+# missing SMTP or SMS setup never crashes the app.
 # ---------------------------------------------------------------------------
 def _send_email_brevo(to_email, subject, body):
     """Send via Brevo's HTTPS API. Works on Render's free tier, which blocks
@@ -256,20 +254,36 @@ def _send_email(to_email, subject, body):
 
 
 def _send_sms(to_phone, body):
-    if not TWILIO_AVAILABLE:
-        return False, "Twilio package not installed."
+    """Send one SMS through Arkesel's v2 API (Ghana). to_phone is +233XXXXXXXXX;
+    Arkesel wants it without the +. Needs ARKESEL_API_KEY and ARKESEL_SENDER_ID."""
+    api_key = os.environ.get("ARKESEL_API_KEY")
+    sender = os.environ.get("ARKESEL_SENDER_ID")
+    if not api_key or not sender:
+        return False, "SMS not configured (missing ARKESEL_API_KEY / ARKESEL_SENDER_ID)."
 
-    sid = os.environ.get("TWILIO_ACCOUNT_SID")
-    token = os.environ.get("TWILIO_AUTH_TOKEN")
-    from_number = os.environ.get("TWILIO_FROM_NUMBER")
-
-    if not (sid and token and from_number):
-        return False, "SMS not configured (missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER)."
-
+    payload = json.dumps({
+        "sender": sender,
+        "message": body,
+        "recipients": [to_phone.lstrip("+")],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://sms.arkesel.com/api/v2/sms/send",
+        data=payload,
+        headers={"api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
     try:
-        client = TwilioClient(sid, token)
-        client.messages.create(body=body, from_=from_number, to=to_phone)
-        return True, "sent"
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.load(resp)
+        if str(data.get("status", "")).lower() == "success":
+            return True, "sent"
+        return False, f"Arkesel said: {str(data.get('message') or data)[:200]}"
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:200]
+        except Exception:
+            detail = ""
+        return False, f"Arkesel error {e.code}: {detail}"
     except Exception as e:
         return False, str(e)
 
@@ -299,7 +313,7 @@ _LEVEL_PLAIN = {
             "Do not walk or drive through flood water, even if it looks shallow. Moving water can be much stronger and deeper than it appears.",
             "Keep your phone charged and switch on, so you can receive further updates.",
             "Check on elderly, disabled, or sick neighbours who may need help moving.",
-            "Follow any instructions given by NADMO or local authorities, even if they differ from this message.",
+            "Follow any instructions given by local authorities or emergency services, even if they differ from this message.",
         ],
     },
     "HIGH": {
@@ -331,6 +345,12 @@ _LEVEL_PLAIN = {
         ],
     },
 }
+
+
+def _STOP_FOOTER():
+    url = os.environ.get("APP_URL", "").strip()
+    where = f"open {url}" if url else "open the FloodGuard app"
+    return f"\n\nTo stop these alerts, {where} and use 'Stop alerts' with this phone number or email."
 
 
 def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
@@ -373,12 +393,13 @@ def _plain_language_message(community, level, rainfall_mm, water_level_m, reason
         f"What this means: {info['meaning']}\n\n"
         f"What to do:\n"
         f"{steps_txt}\n\n"
-        f"Please also follow any guidance from local authorities and NADMO. "
+        f"Please also follow any guidance from local authorities and emergency services. "
         f"If you are unsure what to do, ask a neighbour, a community leader, "
-        f"or call NADMO's emergency line if your area has one.\n\n"
+        f"or call your local emergency number.\n\n"
         f"---\n"
         f"This message was sent automatically by FloodGuard AI. "
         f"For those who want the numbers behind this alert: {reasoning}"
+        f"{_STOP_FOOTER()}"
     )
 
 
@@ -494,16 +515,15 @@ def _fetch_forecast_rainfall_mm(lat, lon):
     meaningful rain is expected in the window. error is None on success, a
     short string on failure, never raises.
 
-    Ghana (Africa/Accra) has no daylight saving and sits at UTC+0, so the
-    server's own UTC clock lines up with local time here without extra
-    conversion.
+    Works anywhere: the forecast is requested in the place's own local
+    timezone and the current hour is worked out from its UTC offset.
     """
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": "precipitation",
         "forecast_days": 3,
-        "timezone": "Africa/Accra",
+        "timezone": "auto",
     }
     url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     try:
@@ -514,7 +534,10 @@ def _fetch_forecast_rainfall_mm(lat, lon):
         if not times or not values:
             return None, None, None, "No forecast data returned by the weather API."
 
-        current_hour = datetime.utcnow().strftime("%Y-%m-%dT%H:00")
+        # Forecast times are in the place's own local time ("timezone=auto"),
+        # so shift the server's UTC clock by the place's UTC offset.
+        offset_s = data.get("utc_offset_seconds", 0) or 0
+        current_hour = (datetime.utcnow() + timedelta(seconds=offset_s)).strftime("%Y-%m-%dT%H:00")
         try:
             start = times.index(current_hour)
         except ValueError:
@@ -599,7 +622,12 @@ def run_scheduled_check():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = []
     manual_water_levels = db.get_water_levels()
-    for community, (lat, lon) in COMMUNITY_COORDS.items():
+    monitored = dict(COMMUNITY_COORDS)
+    try:
+        monitored.update(db.get_places())  # places people signed up for
+    except Exception:
+        pass
+    for community, (lat, lon) in monitored.items():
         rainfall_mm, window_start, window_end, err = _fetch_forecast_rainfall_mm(lat, lon)
 
         auto_level_m, ratio, wl_err = _fetch_river_water_level(lat, lon)
@@ -630,6 +658,12 @@ def run_scheduled_check():
         # here, which meant every 6-hour check for every community showed up
         # as an "alert" even at 0.2mm of rain. Fixed by moving it inside the
         # HIGH/CRITICAL branch below, alongside the real outbound dispatch.
+        # Current status only for readings: drop this community's previous
+        # reading before saving the new one (needs db.delete_reading_for in
+        # db.py; without it, it falls back to the old behaviour). Alerts are
+        # NOT deleted: the alert history is kept.
+        if hasattr(db, "delete_reading_for"):
+            db.delete_reading_for(community)
         db.add_reading(now, community, rainfall_mm or 0, water_level_m, level, level in ("HIGH", "CRITICAL"))
         if level in ("HIGH", "CRITICAL"):
             _raise_alert(now, community, rainfall_mm or 0, water_level_m, level, notes, "scheduled")
@@ -670,10 +704,8 @@ def _geocode_place(name):
 def check_my_area(place_name):
     """On-the-fly flood risk check for ANY location, not just the five fixed
     communities in COMMUNITY_COORDS. This is transient by design: it is not
-    saved anywhere and no alert is sent, so anyone can check risk for
-    wherever they are without registering a new community. To get ongoing
-    automatic alerts, a community still needs to be added to
-    COMMUNITY_COORDS and given a contact list in the Admin tab."""
+    saved anywhere and no alert is sent. People who want ongoing alerts for
+    the place sign up with the form below it (see send_signup_code)."""
     lat, lon, display_name, err = _geocode_place(place_name)
     if err:
         return f"**Could not check this location.** {err}"
@@ -706,10 +738,8 @@ def check_my_area(place_name):
         f"Rainfall: {rain_line}.{window_line}\n\n"
         f"{water_note}\n\n"
         f"---\n"
-        f"*This is a one-time check, not an ongoing alert. Nothing here is saved. "
-        f"To get automatic warnings 12-24 hours before rain for this area going "
-        f"forward, this location would need to be added as a monitored community "
-        f"with a registered contact list, in the Admin tab.*\n\n"
+        f"*Want a warning before heavy rain reaches this area? Scroll down and "
+        f"sign up with your phone number or email.*\n\n"
         f"Technical detail: {reasoning}"
     )
 
@@ -862,6 +892,132 @@ def run_check_now(password):
     return f"Ran the check manually just now.\n\n{summary}", _alerts_table()
 
 
+# ---------------------------------------------------------------------------
+# Self-service sign-up: anyone picks a place, verifies their phone number or
+# email with a 6-digit code, and is then alerted by the scheduled check
+# whenever that place reaches HIGH or CRITICAL risk.
+# ---------------------------------------------------------------------------
+MAX_PLACES = int(os.environ.get("MAX_PLACES", "100"))
+MAX_SUBSCRIBERS = int(os.environ.get("MAX_SUBSCRIBERS", "2000"))
+# SMS is only offered for Ghana numbers (+233); everyone else uses email.
+SMS_COUNTRY_CODE = "+233"
+CODES_PER_HOUR = 3
+MAX_CODE_ATTEMPTS = 5
+
+
+def _normalize_contact(channel, raw):
+    """Returns (value, error). SMS is Ghana only: numbers become +233XXXXXXXXX
+    (a leading 0 is read as Ghana). Numbers from other countries are told to
+    use email instead. Email works for everyone."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None, "Enter your phone number or email first."
+    if channel == "SMS":
+        num = re.sub(r"[\s\-().]", "", raw)
+        if num.startswith("00"):
+            num = "+" + num[2:]
+        elif num.startswith("0"):
+            num = SMS_COUNTRY_CODE + num[1:]
+        elif num.startswith("233"):
+            num = "+" + num
+        if num.startswith("+") and not num.startswith(SMS_COUNTRY_CODE):
+            return None, "SMS alerts are only available for Ghana (+233) phone numbers. Please choose Email instead."
+        if not re.fullmatch(r"\+233\d{9}", num):
+            return None, "That doesn't look like a valid Ghana phone number. Use a format like 0201234567 or +233201234567."
+        return num, None
+    email = raw.lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return None, "That doesn't look like a valid email address."
+    return email, None
+
+
+def send_signup_code(place_name, channel, contact, consent):
+    if not consent:
+        return "Please tick the box to agree to receive flood alerts."
+    value, err = _normalize_contact(channel, contact)
+    if err:
+        return err
+    lat, lon, display_name, geo_err = _geocode_place(place_name)
+    if geo_err:
+        return f"**Could not find that place.** {geo_err}"
+
+    phone, email = (value, "") if channel == "SMS" else ("", value)
+    try:
+        if db.subscriber_signed_up(display_name, phone, email):
+            return f"You're already signed up for **{display_name}** with this {('number' if phone else 'email')}."
+        known_places = set(COMMUNITY_COORDS) | set(db.get_places())
+        if display_name not in known_places and db.count_places() >= MAX_PLACES:
+            return "Sign-ups for new places are paused right now because the system is at capacity. Please try again later."
+        if db.count_subscribers() >= MAX_SUBSCRIBERS:
+            return "Sign-ups are paused right now because the system is at capacity. Please try again later."
+        if db.recent_codes_sent(value) >= CODES_PER_HOUR:
+            return "Too many codes were requested for this contact. Please wait an hour and try again."
+    except Exception as e:
+        return f"Something went wrong on our side ({e}). Please try again."
+
+    code = f"{secrets.randbelow(10**6):06d}"
+    text = (f"Your FloodGuard AI verification code is {code}. It expires in 10 minutes. "
+            f"If you didn't ask for this, ignore this message.")
+    if channel == "SMS":
+        ok, why = _send_sms(value, text)
+    else:
+        ok, why = _send_email(value, "Your FloodGuard AI verification code", text)
+    if not ok:
+        return f"We couldn't send the code: {why}"
+    try:
+        db.create_pending_signup(display_name, lat, lon, channel, value, code)
+    except Exception as e:
+        return f"Something went wrong on our side ({e}). Please try again."
+    return (f"We sent a 6-digit code to **{value}** for **{display_name}**. "
+            f"Enter it below within 10 minutes.")
+
+
+def confirm_signup(channel, contact, code):
+    value, err = _normalize_contact(channel, contact)
+    if err:
+        return err
+    code = (code or "").strip()
+    if not code:
+        return "Enter the 6-digit code we sent you."
+    try:
+        pending = db.get_pending_signup(value)
+        if not pending:
+            return "No active code found for this contact (it may have expired). Tap 'Send me a code' again."
+        if pending["attempts"] >= MAX_CODE_ATTEMPTS:
+            db.delete_pending_signups(value)
+            return "Too many wrong attempts. Please request a new code."
+        if not secrets.compare_digest(code, pending["code"]):
+            db.bump_pending_attempts(pending["id"])
+            return "That code isn't right. Check it and try again."
+
+        place = pending["place"]
+        if place not in COMMUNITY_COORDS:
+            db.add_place(place, pending["lat"], pending["lon"])
+        phone, email = (value, "") if channel == "SMS" else ("", value)
+        if not db.subscriber_signed_up(place, phone, email):
+            db.add_subscriber("", place, phone, email)
+        db.delete_pending_signups(value)
+    except Exception as e:
+        return f"Something went wrong on our side ({e}). Please try again."
+    return (f"✅ You're signed up for **{place}**. We check the forecast every 6 hours and "
+            f"will message you if flood risk there reaches HIGH or CRITICAL. "
+            f"You can stop alerts any time using 'Stop alerts' below.")
+
+
+def stop_alerts(channel, contact):
+    value, err = _normalize_contact(channel, contact)
+    if err:
+        return err
+    phone, email = (value, "") if channel == "SMS" else ("", value)
+    try:
+        removed = db.remove_subscriber_contact(phone or None, email or None)
+    except Exception as e:
+        return f"Something went wrong on our side ({e}). Please try again."
+    if not removed:
+        return "No alerts were set up for that contact."
+    return f"Done. **{value}** has been removed from {removed} alert subscription(s)."
+
+
 def clear_dashboard_and_alerts(password):
     """Admin only: wipes every stored reading and every raised alert, so the
     Community Risk Dashboard and the 'Alerts raised' tables start empty.
@@ -988,7 +1144,8 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
     with gr.Column(elem_classes="fg-hero"):
         gr.Markdown(
             "# 🌊 FloodGuard AI\n"
-            "An automatic flood warning system for flood prone communities in Ghana. "
+            "An automatic flood warning system. Sign up for your area and get a message "
+            "when heavy rain puts it at risk. "
             "It looks at the weather forecast and warns people 12 to 24 hours before "
             "flooding happens, so they have time to prepare instead of finding out "
             "after the flood has already started."
@@ -1002,17 +1159,46 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             '</div>'
         )
 
-    with gr.Tab("Check My Area"):
+    with gr.Tab("Check & Get Alerts"):
         gr.Markdown(
-            "### Check flood risk for anywhere\n"
-            "Not just the monitored communities below. This is a one-time "
-            "check: nothing is saved, and no alert is sent."
+            "### Check flood risk for anywhere, then get alerts\n"
+            "Type any town or area to see its flood risk for the next 24 hours. "
+            "Then sign up below and we'll message you automatically when heavy "
+            "rain puts your area at HIGH or CRITICAL risk."
         )
         with gr.Row():
             place_in = gr.Textbox(label="Place name", placeholder="e.g. Tamale, Ghana")
             check_btn = gr.Button("Check my risk", variant="primary")
         place_out = gr.Markdown()
         check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
+
+        gr.Markdown(
+            "### Get alerts for this place\n"
+            "Use the same place name as above. SMS is available for Ghana phone numbers; email works from anywhere. We'll send a code to confirm it's you."
+        )
+        with gr.Row():
+            su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Send alerts by")
+            su_contact = gr.Textbox(label="Phone number or email", placeholder="Ghana phone (0201234567) or any email")
+        su_consent = gr.Checkbox(label="I agree to receive flood alerts for this place. I can stop any time.")
+        su_send_btn = gr.Button("Send me a code", variant="primary")
+        su_send_out = gr.Markdown()
+        with gr.Row():
+            su_code = gr.Textbox(label="6-digit code", max_lines=1)
+            su_confirm_btn = gr.Button("Confirm")
+        su_confirm_out = gr.Markdown()
+        su_send_btn.click(send_signup_code, inputs=[place_in, su_channel, su_contact, su_consent], outputs=su_send_out)
+        su_confirm_btn.click(confirm_signup, inputs=[su_channel, su_contact, su_code], outputs=su_confirm_out)
+
+        gr.Markdown("📲 **Share this page** with your family, neighbours and community WhatsApp groups so they get warned too.")
+
+        with gr.Accordion("Stop alerts", open=False):
+            gr.Markdown("Enter the phone number or email you signed up with to stop all its alerts.")
+            with gr.Row():
+                stop_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Signed up with")
+                stop_contact = gr.Textbox(label="Phone number or email")
+            stop_btn = gr.Button("Stop my alerts")
+            stop_out = gr.Markdown()
+            stop_btn.click(stop_alerts, inputs=[stop_channel, stop_contact], outputs=stop_out)
 
     with gr.Tab("Community Risk Dashboard"):
         with gr.Column():
