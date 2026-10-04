@@ -860,18 +860,84 @@ def _geocode_place(name):
     )
 
 
+def _find_next_heavy_rain(lat, lon, days=5):
+    """Scan the hourly forecast for the NEXT heavy rain, up to `days` ahead.
+    Heavy rain = a spell where the 24 hours from its start bring at least
+    RAIN_ALERT_MM in total, or at least RAIN_ALERT_PEAK_MM_H in one hour.
+    Returns (result_dict, error). result_dict has found=True with the start,
+    end, peak hour, 24h total and hours until it starts, or found=False with
+    the next 24 hours' total. Never raises."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation",
+        "forecast_days": days,
+        "timezone": "auto",
+    }
+    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.load(resp)
+        times = data.get("hourly", {}).get("time", [])
+        values = data.get("hourly", {}).get("precipitation", [])
+        if not times or not values:
+            return None, "No forecast data returned by the weather API."
+
+        offset_s = data.get("utc_offset_seconds", 0) or 0
+        local_now = datetime.utcnow() + timedelta(seconds=offset_s)
+        current_hour = local_now.strftime("%Y-%m-%dT%H:00")
+        try:
+            start = times.index(current_hour)
+        except ValueError:
+            start = 0
+        vals = [v or 0 for v in values]
+
+        for i in range(start, len(vals)):
+            if vals[i] < 1.0:
+                continue
+            win = vals[i:i + 24]
+            total, peak = sum(win), max(win)
+            if total >= RAIN_ALERT_MM or peak >= RAIN_ALERT_PEAK_MM_H:
+                rain_idx = [j for j, v in enumerate(win) if v >= 1.0]
+                first_dt = datetime.fromisoformat(times[i])
+                last_dt = datetime.fromisoformat(times[i + rain_idx[-1]])
+                peak_dt = datetime.fromisoformat(times[i + win.index(peak)])
+                return {
+                    "found": True,
+                    "total_mm": round(total, 1),
+                    "peak_mm_h": round(peak, 1),
+                    "start": first_dt.strftime("%a %-I:%M %p"),
+                    "end": last_dt.strftime("%a %-I:%M %p"),
+                    "peak_time": peak_dt.strftime("%a %-I:%M %p"),
+                    "hours_until": max(0, round((first_dt - local_now).total_seconds() / 3600)),
+                }, None
+        return {"found": False, "next24_mm": round(sum(vals[start:start + 24]), 1)}, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _hours_phrase(hours):
+    if hours <= 1:
+        return "very soon"
+    if hours < 48:
+        return f"in about {hours} hours"
+    return f"in about {round(hours / 24)} days"
+
+
 def check_my_area(place_name):
-    """On-the-fly flood risk check for ANY location, not just the five fixed
-    communities in COMMUNITY_COORDS. This is transient by design: it is not
-    saved anywhere and no alert is sent. People who want ongoing alerts for
-    the place sign up with the form below it (see send_signup_code)."""
+    """On-the-fly check for ANY location: finds the next heavy rain in the
+    forecast (up to 5 days ahead) and the flood risk that rain would bring.
+    Transient by design: nothing is saved and no alert is sent. People who
+    want ongoing alerts sign up with the form below (see send_signup_code)."""
     lat, lon, display_name, err = _geocode_place(place_name)
     if err:
         return f"**Could not check this location.** {err}"
 
-    rainfall_mm, window_start, window_end, rain_err, rain_info = _fetch_forecast_rainfall_mm(lat, lon)
-    water_level_m, ratio, wl_err = _fetch_river_water_level(lat, lon)
+    nxt, rain_err = _find_next_heavy_rain(lat, lon)
+    if rain_err:
+        return f"**Could not check the rain forecast for {display_name}.** {rain_err}"
 
+    water_level_m, ratio, wl_err = _fetch_river_water_level(lat, lon)
     if water_level_m is None:
         water_level_m = 0.0
         water_note = (
@@ -882,33 +948,38 @@ def check_my_area(place_name):
     else:
         water_note = f"River discharge here is currently running at {ratio}x its recent normal level."
 
-    level, reasoning = _risk_level(rainfall_mm or 0, water_level_m, "", rainfall_label="forecast (next 24h)")
-    badge = _risk_badge_html(level)
+    signup_note = (
+        "*Want a warning before heavy rain reaches this area? Scroll down and "
+        "sign up with your phone number or email.*"
+    )
 
-    window_line = ""
-    if window_start:
-        window_line = f"\n\nHeaviest rain is expected between **{window_start}** and **{window_end}**."
+    if not nxt["found"]:
+        level, reasoning = _risk_level(nxt["next24_mm"], water_level_m, "", rainfall_label="forecast (next 24h)")
+        return (
+            f"### {display_name}\n\n"
+            f"**No heavy rain is forecast in the next 5 days.**\n\n"
+            f"Flood risk: {_risk_badge_html(level)}\n\n"
+            f"Rain in the next 24 hours: about {nxt['next24_mm']:.0f} mm.\n\n"
+            f"{water_note}\n\n"
+            f"---\n{signup_note}\n\n"
+            f"Technical detail: {reasoning}"
+        )
 
-    rain_line = f"{rainfall_mm}mm forecast over the next 24 hours" if rainfall_mm is not None else "unavailable right now"
-    if rain_info.get("hours_until"):
-        window_line += f" That is about {rain_info['hours_until']} hours from now."
-    if rain_info.get("peak_mm_h"):
-        window_line += f" Strongest rainfall in a single hour: about {rain_info['peak_mm_h']:.0f}mm."
-
-    heavy_line = ""
-    if ((rainfall_mm or 0) >= RAIN_ALERT_MM
-            or (rain_info.get("peak_mm_h") or 0) >= RAIN_ALERT_PEAK_MM_H):
-        heavy_line = ("\n\n🌧️ **Heavy rain is forecast.** Review your schedule, avoid low-lying "
-                      "roads and drains, and move valuables off the floor.")
-
+    level, reasoning = _risk_level(nxt["total_mm"], water_level_m, "", rainfall_label="forecast (24h from rain start)")
+    when = _hours_phrase(nxt["hours_until"])
+    window = (f"between **{nxt['start']}** and **{nxt['end']}**" if nxt["end"] != nxt["start"]
+              else f"around **{nxt['start']}**")
+    far_note = ("\n\n*This rain is more than a day away, so the forecast may still change.*"
+                if nxt["hours_until"] > 24 else "")
     return (
         f"### {display_name}\n\n"
-        f"Risk level: {badge}\n\n"
-        f"Rainfall: {rain_line}.{window_line}{heavy_line}\n\n"
+        f"🌧️ **Next heavy rain: {when}**\n\n"
+        f"Flood risk from this rain: {_risk_badge_html(level)}\n\n"
+        f"About {nxt['total_mm']:.0f} mm expected over 24 hours, {window}. "
+        f"Strongest around {nxt['peak_time']} (about {nxt['peak_mm_h']:.0f} mm in one hour)."
+        f"{far_note}\n\n"
         f"{water_note}\n\n"
-        f"---\n"
-        f"*Want a warning before heavy rain reaches this area? Scroll down and "
-        f"sign up with your phone number or email.*\n\n"
+        f"---\n{signup_note}\n\n"
         f"Technical detail: {reasoning}"
     )
 
@@ -1316,15 +1387,15 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
 
     with gr.Tab("Check & Get Alerts"):
         gr.Markdown(
-            "### Check flood risk for anywhere, then get alerts\n"
+            "### See the next heavy rain and its flood risk, for anywhere\n"
             "Type any village, town or city (add the district and country for small places) "
-            "to see its flood risk for the next 24 hours. "
+            "to see when the next heavy rain is expected and how likely it is to cause flooding. "
             "Then sign up below and we'll message you automatically when heavy "
             "rain is forecast for your area or flood risk reaches HIGH or CRITICAL."
         )
         with gr.Row():
             place_in = gr.Textbox(label="Place name", placeholder="Village, district, country (e.g. Dungu, Tamale, Ghana)")
-            check_btn = gr.Button("Check my risk", variant="primary")
+            check_btn = gr.Button("Check next heavy rain", variant="primary")
         place_out = gr.Markdown()
         check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
 
