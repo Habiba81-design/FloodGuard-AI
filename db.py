@@ -16,6 +16,7 @@ in production.
 """
 
 import os
+import secrets
 from contextlib import contextmanager
 
 import psycopg2
@@ -58,6 +59,15 @@ def init_db():
                     email TEXT
                 );
             """)
+            # Every subscriber gets a long random unsubscribe token. It goes in
+            # the unsubscribe link inside their own emails/SMS, so only the
+            # person who received a message can unsubscribe that contact.
+            cur.execute("ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS unsub_token TEXT;")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS subscribers_unsub_token_idx ON subscribers (unsub_token);")
+            cur.execute("SELECT id FROM subscribers WHERE unsub_token IS NULL;")
+            for (sub_id,) in cur.fetchall():
+                cur.execute("UPDATE subscribers SET unsub_token = %s WHERE id = %s;",
+                            (secrets.token_urlsafe(24), sub_id))
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS water_levels (
                     community TEXT PRIMARY KEY,
@@ -142,7 +152,7 @@ def init_db():
 def get_subscribers():
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT name, community, phone, email FROM subscribers;")
+            cur.execute("SELECT name, community, phone, email, unsub_token FROM subscribers;")
             return [dict(r) for r in cur.fetchall()]
 
 
@@ -161,8 +171,9 @@ def add_subscriber(name, community, phone, email):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO subscribers (name, community, phone, email) VALUES (%s, %s, %s, %s);",
-                (name, community, phone, email),
+                "INSERT INTO subscribers (name, community, phone, email, unsub_token) "
+                "VALUES (%s, %s, %s, %s, %s);",
+                (name, community, phone, email, secrets.token_urlsafe(24)),
             )
 
 
@@ -332,22 +343,45 @@ def subscriber_signed_up(place, phone, email):
             return cur.fetchone() is not None
 
 
-def remove_subscriber_contact(phone, email):
-    """Unsubscribe a phone number or email from every place. Returns how many
-    subscriptions were removed, and deletes places left with no subscribers
-    (original communities are kept by the app, not here)."""
+def get_subscriber_by_token(token):
+    """The subscriber a private unsubscribe token belongs to, or None."""
+    if not token:
+        return None
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT community, phone, email FROM subscribers WHERE unsub_token = %s;", (token,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def unsubscribe_by_token(token):
+    """Remove the person who owns this token from every place they signed up
+    for (all rows with the same phone number or email), then delete places
+    left with no subscribers. Returns (removed_count, contact) or None if the
+    token is unknown. There is deliberately no way to unsubscribe someone by
+    typing their phone number or email."""
+    sub = get_subscriber_by_token(token)
+    if not sub:
+        return None
+    phone = (sub.get("phone") or "").strip()
+    email = (sub.get("email") or "").strip()
     with get_conn() as conn:
         with conn.cursor() as cur:
+            removed = 0
             if phone:
                 cur.execute("DELETE FROM subscribers WHERE phone = %s;", (phone,))
-            else:
+                removed += cur.rowcount
+            if email:
                 cur.execute("DELETE FROM subscribers WHERE lower(email) = lower(%s);", (email,))
-            removed = cur.rowcount
+                removed += cur.rowcount
+            if not phone and not email:
+                cur.execute("DELETE FROM subscribers WHERE unsub_token = %s;", (token,))
+                removed += cur.rowcount
             cur.execute(
                 "DELETE FROM places WHERE name NOT IN "
                 "(SELECT DISTINCT community FROM subscribers);"
             )
-            return removed
+    return removed, (phone or email)
 
 
 def recent_codes_sent(contact, minutes=60):

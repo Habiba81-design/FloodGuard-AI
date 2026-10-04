@@ -25,7 +25,9 @@ Outbound alerts (optional, only active once configured):
         Optionally SMTP_HOST, SMTP_PORT, ALERT_FROM_EMAIL.
     SMS (Ghana numbers, via Arkesel): ARKESEL_API_KEY, ARKESEL_SENDER_ID
         (the sender name you registered with Arkesel, max 11 characters).
-    Optional: APP_URL (your app's link, shown in the 'stop alerts' text).
+    APP_URL (your app's public link, e.g. https://your-app.onrender.com). It is used to
+        build the private unsubscribe link in every email and SMS. On Render it is
+        picked up automatically from RENDER_EXTERNAL_URL if APP_URL is not set.
     Rain alerts (all optional): RAIN_ALERT_MIN_INTENSITY ("light", "moderate" or
         "heavy"; default "heavy"; "light" means alert for any rain), RAIN_MODERATE_MM_H (2.5),
         RAIN_ALERT_PEAK_MM_H (8), RAIN_ALERT_MM (30), RAIN_MODERATE_TOTAL_MM (10),
@@ -122,7 +124,7 @@ def _check_admin_password(password):
 # or the send fails, they return (False, reason) instead of raising, so a
 # missing SMTP or SMS setup never crashes the app.
 # ---------------------------------------------------------------------------
-def _send_email_brevo(to_email, subject, body):
+def _send_email_brevo(to_email, subject, body, unsubscribe_url=None):
     """Send via Brevo's HTTPS API. Works on Render's free tier, which blocks
     SMTP ports. Needs BREVO_API_KEY and ALERT_FROM_EMAIL (a sender you have
     verified in Brevo)."""
@@ -130,21 +132,33 @@ def _send_email_brevo(to_email, subject, body):
     from_email = os.environ.get("ALERT_FROM_EMAIL")
     if not api_key or not from_email:
         return False, "Brevo not configured (missing BREVO_API_KEY / ALERT_FROM_EMAIL)."
-    payload = json.dumps({
-        "sender": {"name": "FloodGuard AI", "email": from_email},
-        "to": [{"email": to_email}],
-        "subject": subject,
-        "textContent": body,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.brevo.com/v3/smtp/email",
-        data=payload,
-        headers={"api-key": api_key, "content-type": "application/json", "accept": "application/json"},
-        method="POST",
-    )
-    try:
+    def _post(with_headers):
+        data = {
+            "sender": {"name": "FloodGuard AI", "email": from_email},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "textContent": body,
+        }
+        if with_headers and unsubscribe_url:
+            # Lets Gmail/Outlook show their own "Unsubscribe" button.
+            data["headers"] = {"List-Unsubscribe": f"<{unsubscribe_url}>",
+                               "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}
+        req = urllib.request.Request(
+            "https://api.brevo.com/v3/smtp/email",
+            data=json.dumps(data).encode("utf-8"),
+            headers={"api-key": api_key, "content-type": "application/json", "accept": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=15) as resp:
             return (True, "sent") if resp.status in (200, 201, 202) else (False, f"Brevo returned {resp.status}")
+
+    try:
+        try:
+            return _post(True)
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and unsubscribe_url:
+                return _post(False)  # header rejected: send without it rather than lose the alert
+            raise
     except urllib.error.HTTPError as e:
         try:
             detail = e.read().decode("utf-8")[:200]
@@ -155,10 +169,10 @@ def _send_email_brevo(to_email, subject, body):
         return False, str(e)
 
 
-def _send_email(to_email, subject, body):
+def _send_email(to_email, subject, body, unsubscribe_url=None):
     # Prefer the HTTPS API (works on Render free tier); fall back to SMTP.
     if os.environ.get("BREVO_API_KEY"):
-        return _send_email_brevo(to_email, subject, body)
+        return _send_email_brevo(to_email, subject, body, unsubscribe_url)
 
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     port = int(os.environ.get("SMTP_PORT", "587"))
@@ -173,6 +187,9 @@ def _send_email(to_email, subject, body):
     msg["Subject"] = subject
     msg["From"] = from_email
     msg["To"] = to_email
+    if unsubscribe_url:
+        msg["List-Unsubscribe"] = f"<{unsubscribe_url}>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(body)
 
     try:
@@ -282,128 +299,26 @@ _LEVEL_PLAIN = {
 }
 
 
-def _STOP_FOOTER():
-    url = os.environ.get("APP_URL", "").strip()
-    where = f"open {url}" if url else "open the FloodGuard app"
-    return f"\n\nTo stop these alerts, {where} and use 'Stop alerts' with this phone number or email."
+def _app_base_url():
+    """Public address of this app: APP_URL, or Render's own URL if that is set."""
+    return (os.environ.get("APP_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
 
 
-# ---------------------------------------------------------------------------
-# Rain strength: light / moderate / heavy
-# ---------------------------------------------------------------------------
-_INTENSITY_RANK = {"light": 1, "moderate": 2, "heavy": 3}
-_RAIN_FEEL = {"light": "drizzle or gentle rain", "moderate": "steady rain", "heavy": "intense rain"}
-_RAIN_MEANING = {
-    "light": (
-        "Only light rain is expected. It is unlikely to cause problems by itself, but "
-        "roads can get wet and slippery and anything left outside may get damp."
-    ),
-    "moderate": (
-        "Steady rain is expected. It can make travel and outdoor work difficult, and "
-        "water may gather on low roads and around drains."
-    ),
-    "heavy": (
-        "The rain forecast is heavy enough to be worth preparing for, even though the "
-        "flood risk is not high right now. Plan your schedule and protect your "
-        "belongings before it starts."
-    ),
-}
+def _unsub_url(token):
+    """The private unsubscribe link for one subscriber ('' if it can't be built)."""
+    base = _app_base_url()
+    return f"{base}/unsubscribe?token={token}" if base and token else ""
 
 
-def _rain_intensity(peak_mm_h, total_mm):
-    """Classify a spell of rain as 'light', 'moderate' or 'heavy' from its
-    strongest single hour and its 24 hour total. Returns None when there is
-    too little rain to be worth mentioning.
-
-    heavy    : at least RAIN_ALERT_PEAK_MM_H in one hour, or RAIN_ALERT_MM in 24h
-    moderate : at least RAIN_MODERATE_MM_H in one hour, or RAIN_MODERATE_TOTAL_MM in 24h
-    light    : anything else that still adds up to RAIN_MIN_TOTAL_MM
-    """
-    peak = float(peak_mm_h or 0)
-    total = float(total_mm or 0)
-    if total < RAIN_MIN_TOTAL_MM:
-        return None
-    if peak >= RAIN_ALERT_PEAK_MM_H or total >= RAIN_ALERT_MM:
-        return "heavy"
-    if peak >= RAIN_MODERATE_MM_H or total >= RAIN_MODERATE_TOTAL_MM:
-        return "moderate"
-    return "light"
-
-
-def _intensity_badge_html(intensity):
-    """A small blue pill for light / moderate / heavy rain (blues, so it is
-    not confused with the green-to-red flood risk pills)."""
-    colors = {"light": "#4DABF7", "moderate": "#1C7ED6", "heavy": "#5F3DC4"}
-    color = colors.get(intensity, "#666")
-    return (
-        f'<span style="display:inline-block;padding:3px 12px;border-radius:999px;'
-        f'font-weight:600;color:#fff;background:{color};">{(intensity or "").upper()}</span>'
-    )
-
-
-def _mm(x):
-    """Rainfall for people: whole numbers when large, one decimal when small."""
-    x = float(x or 0)
-    return f"{x:.0f}" if x >= 10 else f"{x:.1f}"
-
-
-def _rain_steps(level, intensity="heavy"):
-    """Advice for a rain alert where flood risk is only LOW or MODERATE,
-    matched to how strong the rain is."""
-    if intensity == "light":
-        steps = [
-            "Carry an umbrella or raincoat if you go out, and take care on wet, slippery roads.",
-            "Normal activities can go on, but bring in washing and cover anything that must stay dry.",
-        ]
-    elif intensity == "moderate":
-        steps = [
-            "Plan your day around the rain: travel, market trips and farm work may be wet and slow.",
-            "Cover or bring in washing, grain, stock and anything that must stay dry.",
-            "Keep clear of streams, drains and river banks, and watch for water gathering on low roads.",
-        ]
-    else:
-        steps = [
-            "Review your schedule: postpone travel, market trips and farm work during the rain if you can.",
-            "Keep clear of streams, drains, river banks and low-lying roads while it falls.",
-        ]
-    if level == "MODERATE":
-        steps.append("Flood chance is MODERATE: move documents, electronics, food stock and farm inputs off the floor or to higher ground now.")
-    elif intensity != "light":
-        steps.append("Flood chance is LOW for now, but stay alert in case it changes, and keep valuables off the floor.")
-    if intensity != "light":
-        steps += [
-            "Keep your phone charged so you can receive updates.",
-            "Never walk or drive through flood water. Tell your family and neighbours.",
-        ]
-    return steps
-
-
-def _rain_summary_text(rainfall_mm, window_start, window_end, info):
-    """One-sentence rainfall summary: how much, how hard, and when."""
-    info = info or {}
-    if rainfall_mm is None:
-        return "Rainfall details are not available right now."
-    text = f"about {rainfall_mm:.0f} mm in the next 24 hours"
-    peak = info.get("peak_mm_h")
-    if peak and peak >= 1:
-        text += f" (up to {peak:.0f} mm in one hour)"
-    if window_start:
-        if info.get("raining_now"):
-            if window_end and window_end != window_start:
-                text += f", rain is falling now and is expected to last until about {window_end}"
-            else:
-                text += ", rain is falling now"
-        else:
-            when = f"between {window_start} and {window_end}" if window_end and window_end != window_start else f"around {window_start}"
-            hours = info.get("hours_until")
-            lead = f", starting in about {hours} hour{'s' if hours != 1 else ''}" if hours is not None and hours > 0 else ", starting very soon"
-            text += f", expected {when}{lead}"
-    return text + "."
+def _STOP_FOOTER(unsub_url=""):
+    if not unsub_url:
+        return ""
+    return f"\n\nTo stop getting these alerts, open this private link: {unsub_url}"
 
 
 def _plain_language_message(community, level, rainfall_mm, water_level_m, reasoning,
                               forecast=False, window_start=None, window_end=None,
-                              info=None, flood_alert=True, water_tracked=True):
+                              info=None, flood_alert=True, water_tracked=True, unsub_url=""):
     """flood_alert=False means this is a rain heads-up: the flood risk itself
     is only LOW/MODERATE, but rain (light, moderate or heavy) is coming."""
     info = info or {}
@@ -445,11 +360,11 @@ def _plain_language_message(community, level, rainfall_mm, water_level_m, reason
         f"---\n"
         f"This message was sent automatically by FloodGuard AI. "
         f"For those who want the numbers behind this alert: {reasoning}"
-        f"{_STOP_FOOTER()}"
+        f"{_STOP_FOOTER(unsub_url)}"
     )
 
 
-def _short_sms(community, level, rainfall_mm, flood_alert, info, window_start):
+def _short_sms(community, level, rainfall_mm, flood_alert, info, window_start, unsub_url=""):
     """A short text for SMS (long messages split into several paid parts)."""
     info = info or {}
     intensity = info.get("intensity") if info.get("intensity") in _INTENSITY_RANK else "moderate"
@@ -477,8 +392,7 @@ def _short_sms(community, level, rainfall_mm, flood_alert, info, window_start):
         act = " Plan your day around the rain and move valuables off the floor."
     else:
         act = " Plan your day around the rain and avoid low roads and drains."
-    url = os.environ.get("APP_URL", "").strip()
-    stop = f" Stop alerts: {url}" if url else " To stop, use 'Stop alerts' on the FloodGuard page."
+    stop = f" Stop: {unsub_url}" if unsub_url else ""
     return head + strength + rain + when + chance + act + stop
 
 
@@ -511,8 +425,6 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
         subject = f"⚠️ Flood alert: {level} risk in {community}{when}"
     else:
         subject = f"🌧️ {intensity.capitalize()} rain expected in {community}{when} (flood chance: {level})"
-    sms_message = _short_sms(community, level, rainfall_mm, flood_alert, info, window_start)
-
     alert_type = "Flood alert" if flood_alert else f"{intensity.capitalize()} rain"
 
     def _log(channel, recipient, ok, why):
@@ -526,14 +438,16 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
     sent_email, sent_sms, failed = 0, 0, 0
     reasons = set()
     for s in targets:
+        link = _unsub_url(s.get("unsub_token"))
         if s.get("email"):
-            ok, why = _send_email(s["email"], subject, message)
+            ok, why = _send_email(s["email"], subject, message + _STOP_FOOTER(link), unsubscribe_url=link or None)
             _log("Email", s["email"], ok, why)
             sent_email += 1 if ok else 0
             failed += 0 if ok else 1
             if not ok:
                 reasons.add(f"email: {why}")
         if s.get("phone"):
+            sms_message = _short_sms(community, level, rainfall_mm, flood_alert, info, window_start, unsub_url=link)
             ok, why = _send_sms(s["phone"], sms_message)
             _log("SMS", s["phone"], ok, why)
             sent_sms += 1 if ok else 0
@@ -1401,22 +1315,8 @@ def confirm_signup(channel, contact, code):
         pass
     return (f"✅ You're signed up for **{place}**. We check the forecast every 6 hours and "
             f"will message you if {_ALERT_WORD} is expected or flood risk there reaches HIGH or CRITICAL. "
-            f"You can stop alerts any time using 'Stop alerts' below."
+            f"Every alert includes a private link to unsubscribe."
             f"{welcome_md}")
-
-
-def stop_alerts(channel, contact):
-    value, err = _normalize_contact(channel, contact)
-    if err:
-        return err
-    phone, email = (value, "") if channel == "SMS" else ("", value)
-    try:
-        removed = db.remove_subscriber_contact(phone or None, email or None)
-    except Exception as e:
-        return f"Something went wrong on our side ({e}). Please try again."
-    if not removed:
-        return "No alerts were set up for that contact."
-    return f"Done. **{value}** has been removed from {removed} alert subscription(s)."
 
 
 def _scheduler_loop():
@@ -1547,7 +1447,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         with gr.Row():
             su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Send alerts by")
             su_contact = gr.Textbox(label="Phone number or email", placeholder="Ghana phone (0201234567) or any email")
-        su_consent = gr.Checkbox(label=f"I agree to receive {_ALERT_WORD} and flood alerts for this place. I can stop any time.")
+        su_consent = gr.Checkbox(label=f"I agree to receive {_ALERT_WORD} and flood alerts for this place. I can unsubscribe from any message.")
         su_send_btn = gr.Button("Send me a code", variant="primary")
         su_send_out = gr.Markdown()
         with gr.Row():
@@ -1558,15 +1458,6 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         su_confirm_btn.click(confirm_signup, inputs=[su_channel, su_contact, su_code], outputs=su_confirm_out)
 
         gr.Markdown("📲 **Share this page** with your family, neighbours and community WhatsApp groups so they get warned too.")
-
-        with gr.Accordion("Stop alerts", open=False):
-            gr.Markdown("Enter the phone number or email you signed up with to stop all its alerts.")
-            with gr.Row():
-                stop_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Signed up with")
-                stop_contact = gr.Textbox(label="Phone number or email")
-            stop_btn = gr.Button("Stop my alerts")
-            stop_out = gr.Markdown()
-            stop_btn.click(stop_alerts, inputs=[stop_channel, stop_contact], outputs=stop_out)
 
     # The Admin tab is visible to everyone, but every action in it (viewing
     # subscribers, viewing alerts sent, running a check) needs ADMIN_PASSWORD.
@@ -1602,6 +1493,90 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             run_now_out = gr.Markdown()
             run_now_btn.click(run_check_now, inputs=[admin_password], outputs=[run_now_out])
 
+# ---------------------------------------------------------------------------
+# Private unsubscribe page. The link in each person's own email/SMS carries a
+# long random token, so nobody can unsubscribe someone else by guessing or
+# knowing their phone number or email. Opening the link only shows a confirm
+# button (mail/SMS scanners often "open" links, and must not unsubscribe
+# people by accident); pressing the button, or a mail app's one-click
+# "Unsubscribe", sends a POST that does the removal.
+# ---------------------------------------------------------------------------
+def _unsub_page(title, message, button_token=None):
+    import html as _html
+    button = ""
+    if button_token:
+        button = (f'<form method="post" action="/unsubscribe?token={_html.escape(button_token)}">'
+                  f'<input type="hidden" name="token" value="{_html.escape(button_token)}">'
+                  f'<button type="submit">Yes, unsubscribe me</button></form>')
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_html.escape(title)}</title>
+<style>
+body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b1018;color:#f1f5f9;
+display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px}}
+.card{{max-width:440px;background:#1e293b;border-radius:16px;padding:28px;text-align:center}}
+h1{{font-size:1.25rem;margin:0 0 12px}} p{{line-height:1.5;margin:0 0 18px}}
+button{{background:#0d9488;color:#fff;border:0;border-radius:10px;padding:12px 22px;font-size:1rem;font-weight:700;cursor:pointer}}
+</style></head><body><div class="card"><h1>{_html.escape(title)}</h1><p>{_html.escape(message)}</p>{button}</div></body></html>"""
+
+
+def _mask_contact(contact):
+    contact = contact or ""
+    if "@" in contact:
+        name, _, domain = contact.partition("@")
+        return (name[:2] + "***@" + domain) if name else contact
+    return (contact[:4] + "****" + contact[-3:]) if len(contact) > 7 else "your number"
+
+
+def _register_unsubscribe_routes(api):
+    from fastapi import Form, Request
+    from fastapi.responses import HTMLResponse
+
+    @api.get("/unsubscribe", response_class=HTMLResponse)
+    def unsubscribe_confirm(token: str = ""):
+        try:
+            sub = db.get_subscriber_by_token(token)
+        except Exception:
+            return HTMLResponse(_unsub_page("Something went wrong", "Please try the link again in a moment."), status_code=500)
+        if not sub:
+            return HTMLResponse(_unsub_page(
+                "Link not valid",
+                "This unsubscribe link isn't valid, or you have already been unsubscribed."), status_code=404)
+        who = _mask_contact(sub.get("phone") or sub.get("email"))
+        return HTMLResponse(_unsub_page(
+            "Stop flood alerts?",
+            f"This will stop all FloodGuard AI alerts sent to {who}.", button_token=token))
+
+    @api.post("/unsubscribe", response_class=HTMLResponse)
+    async def unsubscribe_do(request: Request, token: str = ""):
+        # token comes from the confirm form (body) or from the link itself
+        # (mail apps' one-click unsubscribe POSTs to the URL with the token in it)
+        try:
+            form = await request.form()
+            token = form.get("token") or token
+        except Exception:
+            pass
+        try:
+            result = db.unsubscribe_by_token(token)
+        except Exception:
+            return HTMLResponse(_unsub_page("Something went wrong", "Please try again in a moment."), status_code=500)
+        if not result:
+            return HTMLResponse(_unsub_page(
+                "Already unsubscribed",
+                "This link isn't valid, or you have already been unsubscribed."), status_code=404)
+        return HTMLResponse(_unsub_page(
+            "You're unsubscribed",
+            "You will no longer receive FloodGuard AI alerts. You can sign up again any time."))
+
+
 if __name__ == "__main__":
+    import uvicorn
+    from fastapi import FastAPI
+
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    api = FastAPI()
+    _register_unsubscribe_routes(api)
+    # Gradio serves the main page; the unsubscribe routes above are registered
+    # first so they take priority.
+    app = gr.mount_gradio_app(api, demo, path="/")
+    uvicorn.run(app, host="0.0.0.0", port=port)
