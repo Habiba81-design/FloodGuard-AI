@@ -862,6 +862,21 @@ def run_check_now(password):
     return f"Ran the check manually just now.\n\n{summary}", _alerts_table()
 
 
+def clear_dashboard_and_alerts(password):
+    """Admin only: wipes every stored reading and every raised alert, so the
+    Community Risk Dashboard and the 'Alerts raised' tables start empty.
+    Contacts and water levels are not touched."""
+    ok, err = _check_admin_password(password)
+    if not ok:
+        return err, _dashboard_table(), _alerts_table(), _alerts_table()
+    if not hasattr(db, "clear_readings_and_alerts"):
+        return ("db.py is missing `clear_readings_and_alerts()`. Add it to db.py first.",
+                _dashboard_table(), _alerts_table(), _alerts_table())
+    db.clear_readings_and_alerts()
+    return ("Cleared all risk readings and alerts.",
+            _dashboard_table(), _alerts_table(), _alerts_table())
+
+
 def _scheduler_loop():
     while True:
         try:
@@ -1088,6 +1103,21 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             backtest_out = gr.Markdown()
             backtest_table = gr.Dataframe(label="Day by day breakdown", wrap=True)
             backtest_btn.click(run_backtest, inputs=[admin_password], outputs=[backtest_out, backtest_table])
+
+        with gr.Column():
+            gr.Markdown(
+                "### Clear dashboard and alerts\n"
+                "Deletes every stored risk reading and every raised alert, so the "
+                "Community Risk Dashboard and the alert tables start empty. Contacts "
+                "and water levels are kept. The next check repopulates the dashboard."
+            )
+            clear_btn = gr.Button("Clear all readings and alerts", variant="stop")
+            clear_out = gr.Markdown()
+            clear_btn.click(
+                clear_dashboard_and_alerts,
+                inputs=[admin_password],
+                outputs=[clear_out, readings_dashboard, alerts_dashboard, run_now_alerts],
+            )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
