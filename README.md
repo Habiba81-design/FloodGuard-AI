@@ -1,90 +1,131 @@
 # FloodGuard AI
 
-An automatic flood warning system for flood prone communities in Ghana. It checks the weather forecast ahead of time and warns people 12 to 24 hours before flooding happens, instead of only confirming it after it has started.
+A rain and flood early-warning service for Ghana. Anyone can type in a village, town or city, see when the next rain is expected and how likely it is to cause flooding, and sign up to be messaged automatically before it arrives. Alerts go out by **SMS** (Ghana numbers) or **email** (anywhere).
 
-## Why forecast-based, not reactive
+Built with Python and Gradio, backed by Postgres, and deployed as a single web service.
 
-Most flood reporting tools (including an earlier version of this one) work backward: someone reports water is rising, or a sensor detects it, and the system reacts. That gives people little or no time to prepare. This system instead pulls a rainfall **forecast** for the next 24 hours, so a warning can go out before the rain has even started, which is the whole point of an early-warning system.
+## How it works
 
-## Architecture
+The service looks **forward**, not backward. It reads a rainfall forecast for the next 24 hours, so a warning can reach people before the rain starts instead of confirming a flood after it has begun.
 
 ```
-Open-Meteo Forecast API  ──┐
-Open-Meteo Flood API    ──┼──▶  run_scheduled_check()  ──▶  Postgres (Supabase)
-Open-Meteo Geocoding API──┘            │                          │
-                                        ▼                          ▼
-                                  risk classification      Dashboard / Admin UI
-                                        │
-                                        ▼
-                                Brevo (email) / Twilio (SMS)
+Place name ──▶ Geocoding (OpenStreetMap Nominatim, Open-Meteo)
+                      │
+                      ▼
+Hourly rain forecast ──┐   Open-Meteo (primary), MET Norway (backup)
+River discharge ───────┤   Open-Meteo Flood API (GloFAS)
+                      ▼
+          Risk classification (rule-based)
+                      │
+                      ▼
+      Alert + dedupe ──▶ Brevo (email) / Arkesel (SMS)
+                      │
+                      ▼
+        Postgres (Supabase): subscribers, readings, alerts, delivery log
 ```
 
-- **Gradio** — the web UI and app server, deployed on Render's free tier.
-- **Postgres (Supabase)** — persists readings, alerts, contacts, and water levels across restarts. Render's own filesystem is wiped on every redeploy, so nothing can be stored locally.
-- **Open-Meteo Forecast API** — free, no API key, gives rainfall forecast for any coordinates.
-- **Open-Meteo Flood API (GloFAS)** — free, no API key, gives modelled river discharge for rivers worldwide. Used as the automatic water-level signal.
-- **Open-Meteo Geocoding API** — free, no API key, turns a typed place name into coordinates for the "Check My Area" feature.
-- **Brevo** — sends real outbound email over HTTPS. Chosen specifically because Render's free tier blocks outbound SMTP (ports 25/465/587) as of September 2025, which silently breaks Gmail SMTP sending.
-- **Twilio** — optional SMS sending, not required for the system to work.
+A background thread checks every subscribed place **every 6 hours**. Checking more often than once a day keeps the warning inside its 12 to 24 hour window.
 
-## Why river discharge instead of a real water-level sensor
+## Rain strength
 
-There is no public network of river gauges in Ghana reporting a live depth in metres. What does exist, freely, is GloFAS — a global hydrological model that estimates river discharge (in cubic metres per second) for modelled rivers worldwide, including the Volta system.
+Each rain spell is classed from its heaviest single hour and its 24-hour total:
 
-This system compares today's discharge to that river's own recent 60-day median, and scales the ratio onto the same metres scale already used for the flood threshold:
+| Class | Rule (defaults) |
+|---|---|
+| Heavy | 8 mm in one hour, or 30 mm in 24 h |
+| Moderate | 2.5 mm in one hour, or 10 mm in 24 h |
+| Light | any other rain adding up to at least 1 mm |
 
-- normal flow (ratio 1.0) → scaled to half the threshold
-- double normal flow (ratio 2.0) → scaled to exactly the threshold
+An hour counts as "raining" at 0.5 mm or more. All of these values can be changed with environment variables (see Setup).
 
-This is an approximation, not a real depth reading, and the code says so directly in its own comments. For communities with no modelled river nearby (e.g. New Legon, which floods from drainage, not a river), the system honestly falls back to 0 rather than inventing a number.
+## Flood risk
 
-## Risk classification
+Risk is a simple, explainable rule, deliberately not a black-box model, because people receiving a safety alert should be able to understand why they got it.
 
-Risk is a simple, transparent rule-based check, not a black-box model — deliberately, since a safety-critical alert needs to be explainable to the people receiving it:
+It compares the 24-hour rainfall forecast and a water-level signal against two fixed thresholds (`FLOOD_RAINFALL_THRESHOLD_MM = 80`, `FLOOD_WATER_THRESHOLD_M = 3.2`):
 
-- `FLOOD_RAINFALL_THRESHOLD_MM` and `FLOOD_WATER_THRESHOLD_M` define the baseline HIGH/CRITICAL cutoffs.
-- Either signal alone, if extreme enough (roughly 1.25x the threshold), can push a community straight to CRITICAL, even if the other signal is low — this matters because the two known real-world flood mechanisms in these communities (extreme rainfall vs. a dam-driven discharge spike) don't always show up in both signals at once.
+| Level | Condition |
+|---|---|
+| CRITICAL | both thresholds crossed together, **or** either one alone at 1.25x its threshold |
+| HIGH | water level at 0.8x its threshold, or rainfall at 0.65x its threshold |
+| MODERATE | water level at 0.6x its threshold, or rainfall at 0.3x its threshold |
+| LOW | everything else |
 
-## Known limitations, stated honestly
+Either signal can reach CRITICAL alone, because flooding has two different causes: a river rising, or heavy rain overwhelming drainage with no river involved.
 
-- **Render's free tier spins down after ~15 minutes idle**, pausing the background check until the next visit. This is disclosed in the app itself rather than hidden.
-- **A single shared admin password**, compared with `secrets.compare_digest` to avoid timing attacks, but still not per-user authentication. Fine for a small team, not enterprise-grade.
-- **GloFAS discharge is a proxy, not a real sensor.** It is disclosed as such everywhere it's used, including in the alert email itself.
-- **Thresholds are not yet calibrated per community.** They were set from general Volta-region reporting, not a rigorous statistical fit. The backtest tool (see below) is the first real step toward validating them against actual outcomes rather than assuming they are correct.
+### Water level is a proxy
 
-## Validating accuracy: the backtest tool
+Ghana has no public network of river gauges reporting live depth. Instead, the service takes modelled river discharge from the GloFAS system (via Open-Meteo's Flood API) and compares today's flow with that river's own median over the past 60 days. That ratio is scaled onto the metres scale used for the threshold: normal flow maps to half the threshold, and double normal flow maps to the threshold exactly.
 
-Rather than claim an accuracy number with no evidence behind it, the Admin tab includes a real backtest against two confirmed, recent flood events near New Legon, run through the exact same classification logic the live app uses:
+This is an approximation, not a depth reading. Where no modelled river exists nearby (for example a drainage-only area like New Legon), the service uses a manually entered level if an admin has set one, and otherwise **0**. It does not invent a number.
 
-1. **18 May 2025, Accra** — NADMO-confirmed: 5 deaths, over 3,000 people displaced, after around four hours of heavy rain. Affected Adenta, Kaneshie, Okponglo and East Legon Hills, right around New Legon.
-2. **29 June 2026, Accra** — the most recent major flooding in Ghana at the time this was written, killing at least 10–12 people and overwhelming drainage across Adenta, Madina, Achimota and East Legon.
+## When an alert is sent
 
-Both events are rainfall-driven with no river involved, so together they specifically test whether rainfall alone correctly triggers a warning for a drainage-only location, across two separate real storms a year apart. For each event, it pulls actual historical rainfall for the real dates, and reports how many days during that known flood the system would have correctly flagged HIGH/CRITICAL risk.
+An alert goes out when **either**:
 
-This only works once deployed (it calls live external APIs), and is designed to be extended with more known events over time as a genuine, growing evidence base for the system's accuracy.
+- flood risk is HIGH or CRITICAL, **or**
+- forecast rain meets `RAIN_ALERT_MIN_INTENSITY` (default: heavy), even if flood risk is low,
+
+and the rain is due to start within `ALERT_LEAD_HOURS` (default 12). Flood risk driven by a river, which has no rain start time, is sent straight away.
+
+To avoid messaging people every 6 hours about the same storm, the service sends **one alert per place, per rain day, risk level and rain strength**. If the forecast is upgraded (say, from light to heavy), people are told again.
+
+Each message is written in plain language with steps to take for that risk level. Every send attempt is logged with its channel, recipient, and whether it succeeded.
 
 ## Features
 
-1. **Location-based risk check** ("Check My Area" tab) — anyone can check flood risk for any place name, not just the five pre-registered communities, using live geocoding plus the same forecast and discharge logic.
-2. **Forecast-based prediction** — uses the rainfall forecast, not past data, so warnings come before the rain, not after.
-3. **Automatic alerts** — real email (and SMS, if Twilio is configured) sent 12–24 hours before heavy rain, in plain language with concrete steps.
-4. **Risk levels** — LOW, MODERATE, HIGH, CRITICAL, from forecast rainfall combined with automatic (or manual fallback) water level.
-5. **Community contact lists** — bulk CSV import per community, so residents never need to sign up themselves.
+1. **Check any place.** Type a village, town or city and see when the next rain is expected, how strong it will be, and the flood risk. Works anywhere, not only the original communities.
+2. **Self-service sign-up.** Choose SMS or email and confirm with a 6-digit code (expires in 10 minutes, 5 attempts, 3 codes per hour per contact), so nobody can sign up someone else.
+3. **Forecast-based alerts.** Sent automatically, as described above.
+4. **Live Stats tab.** Public totals only (subscribers, places covered, alerts delivered, delivery rate). Never any phone number or email.
+5. **Admin tab.** Hidden unless the page is opened with `?admin=1`, and every action needs the admin password. Lists subscribers, shows every alert sent and its delivery status, and can run a check immediately.
+
+Five communities are built in with coordinates: Alajo, Mepe, Anloga, Sokpoe and New Legon.
 
 ## Setup
 
-Required environment variables (Render → Environment tab):
+Run locally:
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Deploy on Render as a Web Service with build command `pip install -r requirements.txt` and start command `python app.py`.
+
+### Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `ADMIN_PASSWORD` | Gates every admin action |
-| `DATABASE_URL` | Postgres connection string (Supabase) |
-| `BREVO_API_KEY` | Sends real alert emails over HTTPS |
-| `ALERT_FROM_EMAIL` | Sender address, verified in Brevo |
-| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` | Optional, for SMS |
+| `DATABASE_URL` | **Required.** Postgres connection string (e.g. from Supabase) |
+| `ADMIN_PASSWORD` | **Required for admin actions.** Gates every admin action |
+| `BREVO_API_KEY`, `ALERT_FROM_EMAIL` | Send email over HTTPS (works on Render's free tier, which blocks SMTP) |
+| `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_HOST`, `SMTP_PORT` | Optional SMTP fallback if Brevo is not set |
+| `ARKESEL_API_KEY`, `ARKESEL_SENDER_ID` | Send SMS to Ghana numbers (sender name max 11 characters) |
+| `WEATHER_USER_AGENT` | Contact string required by MET Norway, e.g. `FloodGuardAI/1.0 you@example.com` |
+| `APP_URL` | Public site URL used in link previews |
+| `MAX_PLACES` (100), `MAX_SUBSCRIBERS` (2000) | Sign-up limits |
+| `RAIN_ALERT_MIN_INTENSITY` (heavy), `ALERT_LEAD_HOURS` (12) | When rain alerts are sent |
+| `RAIN_ALERT_PEAK_MM_H` (8), `RAIN_ALERT_MM` (30), `RAIN_MODERATE_MM_H` (2.5), `RAIN_MODERATE_TOTAL_MM` (10), `RAIN_MIN_TOTAL_MM` (1), `RAIN_HOUR_MM` (0.5) | Rain-strength cutoffs |
+
+If email or SMS credentials are missing, sign-up and checks still work, but messages cannot be sent and the failure is recorded in the delivery log.
+
+Tables are created automatically on first start. If `DATABASE_URL` is missing the app raises a clear error instead of silently falling back to memory, which would lose data.
+
+## Known limitations
+
+- **Free-tier hosting sleeps.** Render's free tier spins down after about 15 minutes without visits, which pauses the 6-hour background check until the next visit. Use an always-on instance, or a free uptime pinger (such as UptimeRobot), for guaranteed checks.
+- **Water level is modelled, not measured.** See above. It is not a real gauge reading.
+- **Thresholds are fixed, not calibrated.** The 80 mm and 3.2 m values apply everywhere and have not been fitted or validated per community against recorded flood events.
+- **No automated tests or accuracy evaluation are included yet.**
+- **SMS is Ghana-only (+233).** Everyone else uses email.
+- **Forecasts can be wrong.** An alert means flooding is possible, not certain.
+- **One shared admin password.** Compared in constant time, but it is not per-user authentication.
+- **Delivery depends on providers.** SMS costs credit, and failed sends are logged but not retried.
 
 ## What's next
 
-- Calibrate thresholds per community using more real historical events, once the backtest tool has been run against several.
-- Redesign the interface further beyond the current Gradio theme (color-coded risk badges, distinct typography) toward a fully custom layout.
-- Explore real partnerships with VRA or the Water Resources Commission for genuine gauge data, to replace the GloFAS proxy where possible.
+- Validate and calibrate thresholds against documented flood events, per community.
+- Add real gauge data (for example through the Volta River Authority or the Water Resources Commission) to replace the GloFAS proxy where possible.
+- Add local languages to the alert messages.
+- Add automated tests.
