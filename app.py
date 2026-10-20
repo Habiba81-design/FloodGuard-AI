@@ -1395,48 +1395,385 @@ def confirm_signup(channel, contact, code):
 
 
 # ---------------------------------------------------------------------------
-# Public "Live Stats" tab: overall numbers only. No phone numbers, emails or
-# individual subscribers are ever shown here.
+# Visual helpers for the public pages. The charts are plain HTML and SVG, so
+# they work on any Gradio version and need no extra libraries. Only totals,
+# places and forecasts are ever shown here, never anyone's phone or email.
 # ---------------------------------------------------------------------------
-def _usage_stats():
+import html as _html_lib
+
+_LOGO_B64 = "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"
+
+_LEVEL_COLORS = {"LOW": "#2F9E44", "MODERATE": "#F2A007", "HIGH": "#E8590C", "CRITICAL": "#C92A2A"}
+_LEVEL_ORDER = ["LOW", "MODERATE", "HIGH", "CRITICAL"]
+_RAIN_COLORS = {"none": "#D3E4E7", "light": "#4DABF7", "moderate": "#1C7ED6", "heavy": "#5F3DC4"}
+_PALETTE = ["#0E9AA7", "#1C7ED6", "#5F3DC4", "#F2A007", "#E8590C", "#2F9E44"]
+
+
+def _e(x):
+    """Escape text before it goes into HTML."""
+    return _html_lib.escape(str(x if x is not None else ""), quote=True)
+
+
+def _hour_color(v):
+    if v >= RAIN_ALERT_PEAK_MM_H:
+        return _RAIN_COLORS["heavy"]
+    if v >= RAIN_MODERATE_MM_H:
+        return _RAIN_COLORS["moderate"]
+    if v >= RAIN_HOUR_MM:
+        return _RAIN_COLORS["light"]
+    return _RAIN_COLORS["none"]
+
+
+def _hourly_series(lat, lon):
+    """(times, values, start_index) for the hourly forecast, or None."""
+    try:
+        times, values, offset_s = _hourly_precip(lat, lon, 5)
+    except Exception:
+        return None
+    local_now = datetime.utcnow() + timedelta(seconds=offset_s)
+    try:
+        start = times.index(local_now.strftime("%Y-%m-%dT%H:00"))
+    except ValueError:
+        start = 0
+    return times, [v or 0 for v in values], start
+
+
+def _hourly_chart_html(series, hours=24):
+    """Bar chart of rain per hour, coloured by strength."""
+    if not series:
+        return ""
+    times, vals, start = series
+    seg_t, seg_v = times[start:start + hours], vals[start:start + hours]
+    if not seg_v:
+        return ""
+    top = max(max(seg_v), 4.0)
+    dry = max(seg_v) < RAIN_HOUR_MM
+    step = 6 if hours <= 24 else 12
+    bars, labels = [], []
+    for i, (t, v) in enumerate(zip(seg_t, seg_v)):
+        try:
+            dt = datetime.fromisoformat(t)
+            hour_txt = dt.strftime("%a %-I %p")
+        except Exception:
+            dt, hour_txt = None, ""
+        pct = max(3, round(100 * v / top)) if v > 0 else 3
+        bars.append(
+            f'<div class="fg-bar" title="{_e(hour_txt)}: {_mm(v)} mm" '
+            f'style="height:{pct}%;background:{_hour_color(v)}"></div>'
+        )
+        if i == 0:
+            labels.append("<span>Now</span>")
+        elif i % step == 0 and dt:
+            labels.append(f"<span>{_e(dt.strftime('%-I %p'))}</span>")
+        else:
+            labels.append("<span></span>")
+    legend = "".join(
+        f'<span><i class="fg-dot" style="background:{_RAIN_COLORS[k]}"></i>{k.capitalize()}</span>'
+        for k in ("light", "moderate", "heavy")
+    )
+    return (
+        '<div class="fg-sectitle">Rain forecast, hour by hour (mm)</div>'
+        f'<div class="fg-chart{" dry" if dry else ""}">{"".join(bars)}</div>'
+        f'<div class="fg-axis">{"".join(labels)}</div>'
+        f'<div class="fg-legend">{legend}</div>'
+        + ('<div class="fg-note">No rain is forecast in this period.</div>' if dry else "")
+    )
+
+
+def _risk_scale_html(level):
+    segs = "".join(
+        f'<div class="fg-seg{" on" if n == level else ""}" style="background:{_LEVEL_COLORS[n]}">{n.title()}</div>'
+        for n in _LEVEL_ORDER
+    )
+    color = _LEVEL_COLORS.get(level, "#666")
+    return (
+        f'<div class="fg-lbl">Flood risk: <b style="color:{color}">{_e(level)}</b></div>'
+        f'<div class="fg-scale">{segs}</div>'
+    )
+
+
+def _notice_html(title, msg):
+    return f'<div class="fg-result"><div class="fg-head">{_e(title)}</div><div class="fg-sub">{_e(msg)}</div></div>'
+
+
+def check_my_area_visual(place_name):
+    """Same check as check_my_area, shown as a short headline, a risk scale,
+    an hour by hour rain chart and a few number tiles instead of paragraphs.
+    Nothing is saved and no alert is sent."""
+    lat, lon, display_name, err = _geocode_place(place_name)
+    if err:
+        return _notice_html("Could not check this location", err)
+    nxt, rain_err = _find_next_rain(lat, lon)
+    if rain_err:
+        return _notice_html(f"Could not check the rain forecast for {display_name}", rain_err)
+
+    water_level_m, ratio, wl_err = _fetch_river_water_level(lat, lon)
+    if water_level_m is None:
+        water_level_m = 0.0
+        water_note = ("No modelled river was found near this location, so this check uses rainfall alone. "
+                      "That is expected where flooding comes from drainage rather than a river.")
+    else:
+        water_note = f"River discharge here is running at {ratio}x its recent normal level."
+
+    series = _hourly_series(lat, lon)
+    peak24 = max([float(v) for v in series[1][series[2]:series[2] + 24]] or [0]) if series else 0
+    inten, later, hours_shown = None, None, 24
+
+    if not nxt["found"]:
+        total = nxt["next24_mm"]
+        level, reasoning = _risk_level(total, water_level_m, "", rainfall_label="forecast (next 24h)")
+        headline = "No significant rain in the next 5 days"
+        starts, peak = "None", peak24
+    else:
+        total, peak, inten = nxt["total_mm"], nxt["peak_mm_h"], nxt["intensity"]
+        level, reasoning = _risk_level(total, water_level_m, "", rainfall_label="forecast (24h from rain start)")
+        headline = f"{inten.capitalize()} rain {_rain_when_phrase(nxt)}"
+        h = nxt["hours_until"]
+        starts = "Now" if nxt["raining_now"] else ("Soon" if h <= 1 else (f"{h} h" if h < 48 else f"{round(h / 24)} days"))
+        later = nxt.get("heavy_later")
+        if not nxt["raining_now"] and h >= 20:
+            hours_shown = 48
+
+    plain = _LEVEL_PLAIN.get(level, {}).get("headline", "")
+    badge = f'<div class="fg-badges">{_intensity_badge_html(inten)}<span class="fg-lbl2">rain strength</span></div>' if inten else ""
+    tiles = [(f"{_mm(total)} mm", "Rain over 24 h"), (f"{_mm(peak)} mm/h", "Strongest hour"), (_e(starts), "Rain starts")]
+    if ratio is not None:
+        tiles.append((f"{ratio}x", "River vs normal"))
+    tiles_html = "".join(f'<div class="fg-tile"><div class="fg-tile-v">{v}</div><div class="fg-tile-l">{l}</div></div>' for v, l in tiles)
+
+    warn = ""
+    if later:
+        warn = (f'<div class="fg-warn">Heavier rain later: about {_mm(later["total_mm"])} mm '
+                f'{_e(_hours_phrase(later["hours_until"]))}, around {_e(later["start"])}.</div>')
+
+    return (
+        '<div class="fg-result">'
+        f'<div class="fg-place">{_e(display_name)}</div>'
+        f'<div class="fg-head">{_e(headline)}</div>'
+        f'<div class="fg-sub">{_e(plain)}</div>'
+        f'{badge}'
+        f'{_risk_scale_html(level)}'
+        f'{_hourly_chart_html(series, hours_shown)}'
+        f'<div class="fg-tiles">{tiles_html}</div>'
+        f'{warn}'
+        '<details class="fg-more"><summary>More details</summary>'
+        f'<div>{_e(water_note)}</div>'
+        '<div>Forecasts cover a wide area and can miss local showers or get the timing wrong. '
+        'If it is raining where you are, trust what you see outside.</div>'
+        f'<div>Technical detail: {_e(reasoning)}</div></details>'
+        f'<div class="fg-cta">{"Want a warning before this rain?" if inten else "Want a warning when rain is coming?"} Get a free alert below.</div>'
+        '</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public "Live Dashboard": KPIs, places being watched, charts, recent alerts.
+# ---------------------------------------------------------------------------
+def _kpi_html(value, label, sub=""):
+    sub_html = f'<div class="fg-kpi-s">{_e(sub)}</div>' if sub else ""
+    return f'<div class="fg-kpi"><div class="fg-kpi-v">{_e(value)}</div><div class="fg-kpi-l">{_e(label)}</div>{sub_html}</div>'
+
+
+def _donut_html(parts, center):
+    """parts = [(value, colour, label)]. A ring chart with a legend."""
+    total = sum(p[0] for p in parts) or 1
+    rings, offset = [], 25.0
+    for value, color, _label in parts:
+        pct = 100.0 * value / total
+        if pct > 0:
+            rings.append(
+                f'<circle cx="18" cy="18" r="15.9155" fill="none" stroke="{color}" stroke-width="4.5" '
+                f'stroke-dasharray="{pct:.2f} {100 - pct:.2f}" stroke-dashoffset="{offset:.2f}"></circle>'
+            )
+        offset -= pct
+    svg = (
+        '<svg viewBox="0 0 36 36" class="fg-donut">'
+        '<circle cx="18" cy="18" r="15.9155" fill="none" stroke="#E6EEF0" stroke-width="4.5"></circle>'
+        f'{"".join(rings)}'
+        f'<text x="18" y="20.6" text-anchor="middle" font-size="7.5" font-weight="800" fill="#12343B">{_e(center)}</text>'
+        '</svg>'
+    )
+    legend = "".join(
+        f'<div><i class="fg-dot" style="background:{c}"></i>{_e(l)}: <b>{v}</b></div>' for v, c, l in parts
+    )
+    return f'<div class="fg-donut-wrap">{svg}<div class="fg-donut-legend">{legend}</div></div>'
+
+
+def _hbars_html(items):
+    """items = [(label, count)]. Horizontal bars in different colours."""
+    if not items:
+        return '<div class="fg-empty">Nothing to show yet.</div>'
+    top = max(c for _l, c in items) or 1
+    rows = []
+    for i, (label, count) in enumerate(items):
+        pct = max(4, round(100 * count / top))
+        rows.append(
+            f'<div class="fg-hrow"><span class="fg-hl">{_e(label)}</span>'
+            f'<div class="fg-htrack"><div class="fg-hfill" style="width:{pct}%;background:{_PALETTE[i % len(_PALETTE)]}"></div></div>'
+            f'<span class="fg-hv">{count}</span></div>'
+        )
+    return "".join(rows)
+
+
+def _day_columns_html(day_counts):
+    """day_counts = [(date, count)] oldest first. Column chart."""
+    top = max([c for _d, c in day_counts] + [1])
+    cols, n = [], len(day_counts)
+    for i, (d, c) in enumerate(day_counts):
+        pct = max(3, round(100 * c / top)) if c else 3
+        color = "#0E9AA7" if c else "#D3E4E7"
+        label = d.strftime("%-d %b") if (n - 1 - i) % 4 == 0 else ""
+        cols.append(
+            f'<div class="fg-col"><div class="fg-col-n">{c if c else ""}</div>'
+            f'<div class="fg-col-bar" style="height:{pct}%;background:{color}" title="{_e(d.strftime("%-d %b"))}: {c} alert(s)"></div>'
+            f'<div class="fg-col-d">{_e(label)}</div></div>'
+        )
+    return f'<div class="fg-cols">{"".join(cols)}</div>'
+
+
+def _place_card_html(r):
+    level = _lvl(r)
+    mm = float(r.get("rainfall_mm") or 0)
+    wl = float(r.get("water_level_m") or 0)
+    m = FLOOD_RAINFALL_THRESHOLD_MM
+    scale = 1.5 * m
+    edges = [0.3 * m, 0.65 * m, 1.25 * m, scale]
+    widths, prev = [], 0.0
+    for e in edges:
+        widths.append(100.0 * (e - prev) / scale)
+        prev = e
+    bands = "".join(
+        f'<div style="width:{w:.2f}%;background:{_LEVEL_COLORS[n]}"></div>' for w, n in zip(widths, _LEVEL_ORDER)
+    )
+    pos = min(100.0, 100.0 * mm / scale)
+    river = f" · river {wl:.1f} m" if wl > 0 else ""
+    return (
+        '<div class="fg-pcard">'
+        f'<div class="fg-ptop"><span class="fg-pname">{_e(r.get("community"))}</span>{_risk_badge_html(level)}</div>'
+        f'<div class="fg-band">{bands}<div class="fg-mark" style="left:{pos:.1f}%"></div></div>'
+        f'<div class="fg-pmeta">{_mm(mm)} mm forecast{_e(river)}</div>'
+        f'<div class="fg-pts">Checked {_e(r.get("timestamp"))}</div>'
+        '</div>'
+    )
+
+
+def _lvl(r):
+    lv = (r.get("data_quality_flag") or "LOW").upper()
+    return lv if lv in _LEVEL_ORDER else "LOW"
+
+
+def _latest_readings():
+    """Most recent reading per watched place, highest risk first."""
+    latest = {}
+    for r in db.get_readings():
+        latest[r["community"]] = r
+    return sorted(latest.values(), key=lambda r: (-_LEVEL_ORDER.index(_lvl(r)), str(r.get("community"))))
+
+
+def _watching_strip_html():
+    """A small row on the landing page: places being watched and their risk."""
+    try:
+        rows = _latest_readings()[:6]
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    chips = "".join(
+        f'<span class="fg-chip"><i class="fg-dot" style="background:'
+        f'{_LEVEL_COLORS[_lvl(r)]}"></i>'
+        f'{_e(r.get("community"))}</span>' for r in rows
+    )
+    return f'<div class="fg-strip"><span class="fg-strip-t">Watching now</span>{chips}</div>'
+
+
+def _dashboard_html():
+    """The whole Live Dashboard as one block of HTML."""
     try:
         subs = db.get_subscribers_full()
         dels = db.get_deliveries(limit=100000)
     except Exception as e:
-        return f"Could not load the numbers right now ({e}). Please try again."
+        return _notice_html("Could not load the numbers right now", f"{e}. Please try again.")
 
-    total_subs = len(subs)
+    today = datetime.utcnow().date()
     cutoff = datetime.utcnow() - timedelta(days=7)
-    recent_subs = 0
+    recent = 0
     for r in subs:
         try:
             if datetime.strptime(r["subscribed_at"], "%Y-%m-%d %H:%M") >= cutoff:
-                recent_subs += 1
+                recent += 1
         except Exception:
             pass
-    places = sorted({(r.get("place") or "").strip() for r in subs if (r.get("place") or "").strip()})
+    place_counts = {}
+    for r in subs:
+        p = (r.get("place") or "").strip()
+        if p:
+            place_counts[p] = place_counts.get(p, 0) + 1
+    top_places = sorted(place_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
 
     sent = [d for d in dels if d["status"] == "sent"]
+    failed_n = len(dels) - len(sent)
     email_n = sum(1 for d in sent if d["channel"] == "Email")
     sms_n = sum(1 for d in sent if d["channel"] == "SMS")
-    # number of distinct alerts issued (one per place, type and day)
     events = {(d["sent_at"][:10], d["place"], d["alert_type"], d["risk_level"]) for d in dels}
 
-    lines = [
-        f"**Subscribers:** {total_subs} ({recent_subs} joined in the last 7 days)",
-        f"**Places covered:** {len(places)}",
-    ]
-    if dels:
-        lines.append(f"**Alert messages delivered:** {len(sent)} of {len(dels)} "
-                     f"({round(100 * len(sent) / len(dels))}%), {email_n} by email and {sms_n} by SMS")
-        lines.append(f"**Rain and flood alerts issued:** {len(events)}")
+    per_day = {}
+    for ev in events:
+        per_day[ev[0]] = per_day.get(ev[0], 0) + 1
+    days = [(today - timedelta(days=i)) for i in range(13, -1, -1)]
+    day_counts = [(d, per_day.get(d.isoformat(), 0)) for d in days]
+
+    rate = f"{round(100 * len(sent) / len(dels))}% delivered" if dels else "none sent yet"
+    kpis = (
+        _kpi_html(len(subs), "Subscribers", f"{recent} joined in the last 7 days")
+        + _kpi_html(len(place_counts), "Places covered")
+        + _kpi_html(len(events), "Alerts issued")
+        + _kpi_html(len(sent), "Messages sent", rate)
+    )
+
+    try:
+        watched = _latest_readings()
+    except Exception:
+        watched = []
+    if watched:
+        cards = "".join(_place_card_html(r) for r in watched)
+        watched_html = (f'<div class="fg-pgrid">{cards}</div>'
+                        '<div class="fg-note">The bar shows forecast rain for the next 24 hours against the '
+                        'green, amber, orange and red risk zones. The dark marker is where each place is now.</div>')
     else:
-        lines.append("**Alerts so far:** none have been sent yet.")
-    if places:
-        shown = places[:40]
-        more = f" and {len(places) - len(shown)} more" if len(places) > len(shown) else ""
-        lines.append("**Places:** " + "; ".join(shown) + more)
-    return "\n\n".join(lines)
+        watched_html = '<div class="fg-empty">No places are being watched yet. A place appears here once someone signs up for its alerts.</div>'
+
+    if dels:
+        delivery_html = _donut_html([(email_n, "#1C7ED6", "Email"), (sms_n, "#0E9AA7", "SMS"), (failed_n, "#E8590C", "Failed")],
+                                    f"{round(100 * len(sent) / len(dels))}%")
+    else:
+        delivery_html = '<div class="fg-empty">No alerts have been sent yet.</div>'
+
+    try:
+        recent_alerts = db.get_alerts()[:6]
+    except Exception:
+        recent_alerts = []
+    if recent_alerts:
+        rows = "".join(
+            f'<div class="fg-arow"><div class="fg-amain"><span class="fg-ap">{_e(a.get("community"))}</span>'
+            f'<span class="fg-at">{_e(a.get("time"))} · {_mm(a.get("rainfall_mm"))} mm forecast</span></div>'
+            f'{_risk_badge_html((a.get("risk_level") or "LOW").upper())}</div>'
+            for a in recent_alerts
+        )
+    else:
+        rows = '<div class="fg-empty">No alerts yet. That means no place has reached the alert rules.</div>'
+
+    return (
+        '<div class="fg-dash">'
+        f'<div class="fg-kpis">{kpis}</div>'
+        '<div class="fg-panel"><div class="fg-sectitle">Places being watched</div>' + watched_html + '</div>'
+        '<div class="fg-panel"><div class="fg-sectitle">Alerts issued, last 14 days</div>' + _day_columns_html(day_counts) + '</div>'
+        '<div class="fg-two">'
+        '<div class="fg-panel"><div class="fg-sectitle">Subscribers by place</div>' + _hbars_html(top_places) + '</div>'
+        '<div class="fg-panel"><div class="fg-sectitle">How alerts were delivered</div>' + delivery_html + '</div>'
+        '</div>'
+        '<div class="fg-panel"><div class="fg-sectitle">Recent alerts</div>' + rows + '</div>'
+        '</div>'
+    )
 
 
 def _scheduler_loop():
@@ -1462,75 +1799,182 @@ _scheduler_thread.start()
 # UI
 # ---------------------------------------------------------------------------
 FLOODGUARD_CSS = """
-:root {
-    --fg-deep: #0B3D3F;
-    --fg-mid: #0F6466;
-    --fg-accent: #14919B;
+/* ---------- Light theme. These variables are set for both light and dark
+   mode, so the site always looks light, even on phones set to dark mode. --- */
+:root, .dark, body, .gradio-container {
+    color-scheme: light !important;
+    --body-background-fill: #F4F9F9 !important;
+    --background-fill-primary: #FFFFFF !important;
+    --background-fill-secondary: #F4F9F9 !important;
+    --block-background-fill: #FFFFFF !important;
+    --panel-background-fill: #FFFFFF !important;
+    --block-border-color: #DCE9EA !important;
+    --border-color-primary: #DCE9EA !important;
+    --body-text-color: #12343B !important;
+    --body-text-color-subdued: #5B7479 !important;
+    --block-title-text-color: #12343B !important;
+    --block-label-text-color: #3F6168 !important;
+    --block-label-background-fill: #FFFFFF !important;
+    --input-background-fill: #FFFFFF !important;
+    --input-background-fill-focus: #FFFFFF !important;
+    --input-border-color: #C9DCDE !important;
+    --input-border-color-focus: #0B7F83 !important;
+    --input-placeholder-color: #7A9296 !important;
+    --button-primary-background-fill: #0B7F83 !important;
+    --button-primary-background-fill-hover: #096A6E !important;
+    --button-primary-text-color: #FFFFFF !important;
+    --button-primary-border-color: #0B7F83 !important;
+    --button-secondary-background-fill: #E7F4F4 !important;
+    --button-secondary-background-fill-hover: #D6ECEC !important;
+    --button-secondary-text-color: #0B5E62 !important;
+    --button-secondary-border-color: #C9DCDE !important;
+    --checkbox-label-background-fill: #FFFFFF !important;
+    --checkbox-label-text-color: #12343B !important;
+    --table-even-background-fill: #FFFFFF !important;
+    --table-odd-background-fill: #F4F9F9 !important;
+    --table-border-color: #DCE9EA !important;
+    --color-accent: #0B7F83 !important;
+    --color-accent-soft: #E7F4F4 !important;
 }
-
-.gradio-container, h1, h2, h3, .prose h1, .prose h2, .prose h3, body, button, input, textarea {
+body, .gradio-container {
+    background: #F4F9F9 !important;
+    color: #12343B !important;
+}
+.gradio-container {
+    max-width: 860px !important;
+    margin: 0 auto !important;
+}
+.gradio-container, h1, h2, h3, body, button, input, textarea, select {
     font-family: Arial, Helvetica, sans-serif !important;
-    letter-spacing: -0.01em;
 }
+footer { opacity: 0.6; }
 
-/* --- Hero banner: flood photo (from the Phase 1 proposal) as background, with a
-   dark gradient overlay so the white text stays readable over it --- */
-.fg-hero {
-    position: relative;
-    padding: 34px 26px 26px 26px !important;
-    margin: -8px -8px 22px -8px !important;
-    border-radius: 0 0 22px 22px;
-    background:
-        linear-gradient(135deg, rgba(11,61,63,0.82) 0%, rgba(15,100,102,0.78) 55%, rgba(20,145,155,0.65) 100%),
-        url("{HERO_IMG}");
-    background-blend-mode: normal;
-    background-size: cover;
-    background-position: center;
-    box-shadow: 0 8px 22px rgba(11,61,63,0.28);
+/* ---------- Header: logo, name, one line ---------- */
+.fg-hero2 {
+    display: flex; align-items: center; gap: 16px;
+    padding: 22px 20px;
+    border-radius: 20px;
+    background: linear-gradient(135deg, #DDF2F1 0%, #F4F9F9 100%);
+    border: 1px solid #DCE9EA;
 }
-.fg-hero h1 {
-    color: #ffffff !important;
-    font-size: 2.15em !important;
-    font-weight: 800 !important;
-    margin: 0 0 8px 0 !important;
-}
-.fg-hero .prose p {
-    color: rgba(255,255,255,0.93) !important;
-    font-size: 1.02em !important;
-    max-width: 680px;
-    line-height: 1.55 !important;
-}
+.fg-logo { width: 64px; height: 64px; border-radius: 16px; margin: 0 !important; flex: none;
+           box-shadow: 0 4px 14px rgba(11,61,92,0.25); }
+.fg-title { font-size: 34px; font-weight: 800; color: #0B3D5C; line-height: 1.1; }
+.fg-tag { font-size: 17px; color: #3F6168; margin-top: 6px; line-height: 1.35; }
 
-.risk-legend {
-    display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 0 0;
+/* ---------- Section headings: clear order of importance ---------- */
+.fg-h2 { font-size: 22px; font-weight: 800; color: #12343B; margin: 4px 0 2px 0; }
+.fg-h2s { font-size: 14px; color: #5B7479; margin: 0 0 8px 0; }
+.fg-card {
+    background: #FFFFFF !important;
+    border: 1px solid #DCE9EA !important;
+    border-radius: 16px !important;
+    padding: 18px !important;
+    box-shadow: 0 2px 10px rgba(11,61,92,0.06) !important;
 }
-.risk-legend span {
-    padding: 4px 14px; border-radius: 999px; font-weight: 700; color: #fff; font-size: 0.8em;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.18);
-    letter-spacing: 0.02em;
-}
+#fg-search textarea, #fg-search input { font-size: 18px !important; }
+#fg-go button, #fg-go { font-size: 17px !important; font-weight: 700 !important; }
 
+/* ---------- Tabs ---------- */
+button[role="tab"] { font-size: 16px !important; font-weight: 700 !important; color: #5B7479 !important; }
+button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
 
-/* Bigger, bolder tab labels */
-.tabs > .tab-nav button {
-    font-weight: 700 !important;
-    font-size: 1.03em !important;
+/* ---------- Watching strip ---------- */
+.fg-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 4px; }
+.fg-strip-t { font-size: 13px; font-weight: 700; color: #5B7479; text-transform: uppercase; letter-spacing: .05em; margin-right: 4px; }
+.fg-chip { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 999px;
+           background: #FFFFFF; border: 1px solid #DCE9EA; font-size: 14px; font-weight: 700; color: #12343B; }
+.fg-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+
+/* ---------- Check result card ---------- */
+.fg-result { background: #FFFFFF; border: 1px solid #DCE9EA; border-radius: 18px; padding: 20px;
+             box-shadow: 0 2px 12px rgba(11,61,92,0.07); color: #12343B; }
+.fg-place { font-size: 13px; font-weight: 700; color: #5B7479; text-transform: uppercase; letter-spacing: .06em; }
+.fg-head { font-size: 26px; font-weight: 800; line-height: 1.2; margin: 6px 0 8px 0; color: #12343B; }
+.fg-sub { font-size: 16px; color: #3F6168; margin-bottom: 12px; line-height: 1.4; }
+.fg-badges { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.fg-lbl2 { font-size: 13px; color: #5B7479; }
+.fg-lbl { font-size: 14px; color: #3F6168; margin: 6px 0 6px 0; }
+.fg-scale { display: flex; gap: 4px; margin-bottom: 18px; }
+.fg-seg { flex: 1; text-align: center; color: #fff; font-size: 12px; font-weight: 700; padding: 7px 0;
+          border-radius: 8px; opacity: 0.28; }
+.fg-seg.on { opacity: 1; box-shadow: 0 3px 8px rgba(0,0,0,0.25); transform: translateY(-1px); }
+.fg-sectitle { font-size: 13px; font-weight: 700; color: #5B7479; text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 10px 0; }
+.fg-chart { display: flex; align-items: flex-end; gap: 2px; height: 120px; border-bottom: 1px solid #DCE9EA; }
+.fg-chart.dry { height: 40px; }
+.fg-bar { flex: 1; border-radius: 3px 3px 0 0; min-width: 2px; }
+.fg-axis { display: flex; gap: 2px; margin-top: 5px; }
+.fg-axis span { flex: 1; font-size: 11px; color: #5B7479; white-space: nowrap; overflow: visible; }
+.fg-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: #5B7479; margin-top: 10px; }
+.fg-legend span { display: inline-flex; align-items: center; }
+.fg-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 18px; }
+.fg-tile { background: #F1F8F8; border-radius: 12px; padding: 12px 14px; }
+.fg-tile-v { font-size: 22px; font-weight: 800; color: #12343B; }
+.fg-tile-l { font-size: 12px; color: #5B7479; margin-top: 2px; }
+.fg-warn { background: #FFF4E5; border: 1px solid #FFD8A8; color: #7A4A00; border-radius: 12px;
+           padding: 10px 14px; margin-top: 14px; font-size: 14px; }
+.fg-more summary { cursor: pointer; font-size: 13px; color: #0B7F83; font-weight: 700; margin-top: 16px; }
+.fg-more div { font-size: 13px; color: #5B7479; margin-top: 8px; line-height: 1.45; }
+.fg-cta { margin-top: 16px; font-size: 15px; font-weight: 700; color: #0B7F83; }
+
+/* ---------- Live dashboard ---------- */
+.fg-dash { display: flex; flex-direction: column; gap: 14px; }
+.fg-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.fg-kpi { background: #FFFFFF; border: 1px solid #DCE9EA; border-radius: 16px; padding: 16px;
+          border-top: 4px solid #0E9AA7; box-shadow: 0 2px 10px rgba(11,61,92,0.05); }
+.fg-kpi:nth-child(2) { border-top-color: #1C7ED6; }
+.fg-kpi:nth-child(3) { border-top-color: #F2A007; }
+.fg-kpi:nth-child(4) { border-top-color: #5F3DC4; }
+.fg-kpi-v { font-size: 34px; font-weight: 800; color: #12343B; line-height: 1.1; }
+.fg-kpi-l { font-size: 14px; font-weight: 700; color: #3F6168; margin-top: 4px; }
+.fg-kpi-s { font-size: 12px; color: #5B7479; margin-top: 3px; }
+.fg-panel { background: #FFFFFF; border: 1px solid #DCE9EA; border-radius: 16px; padding: 6px 18px 18px 18px;
+            box-shadow: 0 2px 10px rgba(11,61,92,0.05); }
+.fg-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.fg-empty { font-size: 14px; color: #5B7479; padding: 10px 0; }
+.fg-note { font-size: 12px; color: #5B7479; margin-top: 12px; line-height: 1.4; }
+.fg-pgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.fg-pcard { border: 1px solid #DCE9EA; border-radius: 14px; padding: 14px; background: #FBFDFD; }
+.fg-ptop { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+.fg-pname { font-size: 17px; font-weight: 800; color: #12343B; }
+.fg-band { position: relative; display: flex; height: 12px; border-radius: 999px; overflow: visible; }
+.fg-band > div:not(.fg-mark) { height: 100%; opacity: 0.45; }
+.fg-band > div:first-child { border-radius: 999px 0 0 999px; }
+.fg-band > div:nth-last-child(2) { border-radius: 0 999px 999px 0; }
+.fg-mark { position: absolute; top: -4px; width: 6px; height: 20px; margin-left: -3px; border-radius: 3px;
+           background: #12343B; border: 2px solid #fff; box-sizing: content-box; }
+.fg-pmeta { font-size: 14px; color: #12343B; margin-top: 12px; font-weight: 700; }
+.fg-pts { font-size: 12px; color: #5B7479; margin-top: 2px; }
+.fg-cols { display: flex; align-items: flex-end; gap: 4px; height: 150px; padding-top: 4px; }
+.fg-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 0; }
+.fg-col-bar { width: 100%; border-radius: 4px 4px 0 0; }
+.fg-col-n { font-size: 12px; font-weight: 700; color: #12343B; height: 16px; }
+.fg-col-d { font-size: 10px; color: #5B7479; height: 14px; margin-top: 4px; white-space: nowrap; overflow: visible; }
+.fg-hrow { display: flex; align-items: center; gap: 10px; margin: 9px 0; }
+.fg-hl { width: 38%; font-size: 14px; color: #12343B; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fg-htrack { flex: 1; background: #EDF4F5; border-radius: 999px; height: 14px; }
+.fg-hfill { height: 100%; border-radius: 999px; }
+.fg-hv { width: 26px; text-align: right; font-weight: 800; font-size: 14px; color: #12343B; }
+.fg-donut-wrap { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; padding-top: 4px; }
+.fg-donut { width: 130px; height: 130px; transform: rotate(0deg); }
+.fg-donut-legend div { font-size: 14px; margin: 6px 0; color: #12343B; }
+.fg-arow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 0; border-bottom: 1px solid #EDF4F5; }
+.fg-arow:last-child { border-bottom: none; }
+.fg-amain { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fg-ap { font-weight: 800; color: #12343B; font-size: 16px; }
+.fg-at { color: #5B7479; font-size: 13px; }
+
+@media (max-width: 520px) {
+    .fg-title { font-size: 28px; }
+    .fg-head { font-size: 22px; }
+    .fg-hero2 { padding: 16px; }
 }
 """
 
-# Embed the hero photo (hero.jpg, next to this file) directly in the CSS so no
-# static-file route is needed.
-import base64
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hero.jpg"), "rb") as _f:
-    _hero_b64 = base64.b64encode(_f.read()).decode()
-FLOODGUARD_CSS = FLOODGUARD_CSS.replace("{HERO_IMG}", "data:image/jpeg;base64," + _hero_b64)
-
 # ---------------------------------------------------------------------------
-# Link preview picture + home screen picture (added; nothing else changed)
+# Link preview picture + home screen picture
 # ---------------------------------------------------------------------------
-# Upload og-image.jpg and home-screen.png to your GitHub repo (next to app.py),
-# then replace YOURNAME and YOURREPO below with your GitHub username and repo
-# name (and "main" if your branch is called something else).
+# Upload og-image.jpg and home-screen.png to your GitHub repo (next to app.py).
 _IMAGE_BASE = "https://raw.githubusercontent.com/Habiba81-design/FloodGuard-AI/main"
 _SITE_URL = (os.environ.get("APP_URL", "").strip() or "https://floodguard-ai-1.onrender.com").rstrip("/")
 _PREVIEW_IMAGE = f"{_IMAGE_BASE}/og-image.jpg"
@@ -1566,97 +2010,93 @@ try:
 except Exception:
     _BLOCKS_EXTRA = {}
 
+_HERO_HTML = (
+    '<div class="fg-hero2">'
+    f'<img class="fg-logo" alt="FloodGuard AI logo" src="data:image/png;base64,{_LOGO_B64}">'
+    '<div><div class="fg-title">FloodGuard AI</div>'
+    '<div class="fg-tag">Know before the rain floods your area.</div></div>'
+    '</div>'
+)
+
 with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", secondary_hue="amber"), css=FLOODGUARD_CSS, **_BLOCKS_EXTRA) as demo:
-    with gr.Column(elem_classes="fg-hero"):
-        gr.Markdown(
-            "# 🌊 FloodGuard AI\n"
-            "An automatic rain and flood warning system. Sign up for your area and get a message "
-            f"when {_ALERT_WORD} is coming or flooding is likely. "
-            "It looks at the weather forecast and warns people up to 12 hours before "
-            "flooding happens, so they have time to prepare instead of finding out "
-            "after the flood has already started."
-        )
-        gr.HTML(
-            '<div class="risk-legend">'
-            '<span style="background:#2F9E44;">LOW</span>'
-            '<span style="background:#F2A007;">MODERATE</span>'
-            '<span style="background:#E8590C;">HIGH</span>'
-            '<span style="background:#C92A2A;">CRITICAL</span>'
-            '</div>'
-        )
+    gr.HTML(_HERO_HTML)
 
     with gr.Tab("Check & Get Alerts"):
-        gr.Markdown(
-            "### See the next rain and its flood risk, for anywhere\n"
-            "Type any village, town or city (add the district and country for small places) "
-            "to see when the next rain is expected, how strong it will be, and how likely it is to cause flooding. "
-            "Then sign up below and we'll message you automatically when "
-            f"{_ALERT_WORD} is forecast for your area or flood risk reaches HIGH or CRITICAL.\n\n"
-            "**Rain strength:** Light = drizzle or gentle rain. Moderate = steady rain (about 2.5 to 8 mm an hour). "
-            "Heavy = 8 mm an hour or more, or 30 mm or more in a day."
-        )
-        with gr.Row():
-            place_in = gr.Textbox(label="Place name", placeholder="Village, district, country (e.g. Dungu, Tamale, Ghana)")
-            check_btn = gr.Button("Check next rain", variant="primary")
-        place_out = gr.Markdown()
-        check_btn.click(check_my_area, inputs=place_in, outputs=place_out)
+        # 1. The main thing: check your place.
+        gr.HTML(_watching_strip_html)
+        with gr.Column(elem_classes="fg-card"):
+            gr.HTML('<div class="fg-h2">Check your area</div>'
+                    '<div class="fg-h2s">Type a village, town or city. Add the district for small places.</div>')
+            with gr.Row():
+                place_in = gr.Textbox(show_label=False, container=False, scale=4, elem_id="fg-search",
+                                      placeholder="e.g. Dungu, Tamale, Ghana")
+                check_btn = gr.Button("Check", variant="primary", scale=1, elem_id="fg-go")
+        place_out = gr.HTML()
+        check_btn.click(check_my_area_visual, inputs=place_in, outputs=place_out)
+        place_in.submit(check_my_area_visual, inputs=place_in, outputs=place_out)
 
-        gr.Markdown(
-            "### Get alerts for this place\n"
-            "Use the same place name as above. SMS is available for Ghana phone numbers; email works from anywhere. We'll send a code to confirm it's you."
-        )
-        with gr.Row():
-            su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="Send alerts by")
-            su_contact = gr.Textbox(label="Phone number or email", placeholder="Ghana phone (0201234567) or any email")
-        su_consent = gr.Checkbox(label=f"I agree to receive {_ALERT_WORD} and flood alerts for this place. I can stop any time.")
-        su_send_btn = gr.Button("Send me a code", variant="primary")
-        su_send_out = gr.Markdown()
-        with gr.Row():
-            su_code = gr.Textbox(label="6-digit code", max_lines=1)
-            su_confirm_btn = gr.Button("Confirm")
-        su_confirm_out = gr.Markdown()
-        su_send_btn.click(send_signup_code, inputs=[place_in, su_channel, su_contact, su_consent], outputs=su_send_out)
-        su_confirm_btn.click(confirm_signup, inputs=[su_channel, su_contact, su_code], outputs=su_confirm_out)
+        # 2. Then: get alerts.
+        with gr.Column(elem_classes="fg-card"):
+            gr.HTML('<div class="fg-h2">Get free alerts for this place</div>'
+                    '<div class="fg-h2s">We message you when heavy rain or flooding is likely. '
+                    'SMS works for Ghana numbers, email works from anywhere.</div>')
+            su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="1. How should we reach you?")
+            su_contact = gr.Textbox(label="Phone number or email", placeholder="0201234567 or name@email.com")
+            su_consent = gr.Checkbox(label=f"I agree to receive {_ALERT_WORD} and flood alerts for this place. I can stop any time.")
+            su_send_btn = gr.Button("Send me a code", variant="primary")
+            su_send_out = gr.Markdown()
+            with gr.Row():
+                su_code = gr.Textbox(label="2. Enter the 6-digit code", max_lines=1, scale=3)
+                su_confirm_btn = gr.Button("Confirm", scale=1)
+            su_confirm_out = gr.Markdown()
+            su_send_btn.click(send_signup_code, inputs=[place_in, su_channel, su_contact, su_consent], outputs=su_send_out)
+            su_confirm_btn.click(confirm_signup, inputs=[su_channel, su_contact, su_code], outputs=su_confirm_out)
 
-        gr.Markdown("📲 **Share this page** with your family, neighbours and community WhatsApp groups so they get warned too.")
+        # 3. Extra reading, tucked away so the page stays simple.
+        with gr.Accordion("How it works", open=False):
+            gr.Markdown(
+                "1. **We read the weather forecast** for your place, hour by hour.\n"
+                "2. **We rate the flood risk** from Low to Critical, using the rain and, where there is a river, its level.\n"
+                "3. **We message you** before the rain, so you have time to prepare.\n\n"
+                "**Rain strength:** Light is drizzle. Moderate is steady rain (about 2.5 to 8 mm an hour). "
+                "Heavy is 8 mm an hour or more, or 30 mm or more in a day."
+            )
+        gr.Markdown("Share this page with family, neighbours and community WhatsApp groups so they get warned too.")
 
-    with gr.Tab("Live Stats"):
-        gr.Markdown(
-            "### How the system is being used\n"
-            "Live numbers from the system. Only totals and places are shown, "
-            "never anyone's phone number or email."
-        )
-        usage_md = gr.Markdown()
-        usage_refresh = gr.Button("Refresh numbers")
-        usage_refresh.click(_usage_stats, None, usage_md)
+    with gr.Tab("Live Dashboard"):
+        gr.HTML('<div class="fg-h2">Live dashboard</div>'
+                '<div class="fg-h2s">Live numbers from the system. Only totals and places are shown, never anyone\'s phone number or email.</div>')
+        dash_html = gr.HTML()
+        usage_refresh = gr.Button("Refresh")
+        usage_refresh.click(_dashboard_html, None, dash_html)
 
     # The Admin tab is hidden from subscribers. It only appears for whoever
     # opens the site with ?admin=1 at the end of the link, and every action in
     # it (viewing subscribers, viewing alerts sent, running a check) still
     # needs ADMIN_PASSWORD.
     with gr.Tab("Admin", visible=False) as admin_tab:
-        with gr.Column():
+        with gr.Column(elem_classes="fg-card"):
             gr.Markdown(
                 "### Admin\n"
                 "Who has subscribed and which alerts were sent. Enter the admin password to use anything on this tab."
             )
             admin_password = gr.Textbox(label="Admin password", type="password")
 
-        with gr.Column():
+        with gr.Column(elem_classes="fg-card"):
             gr.Markdown("### Subscribers\nEveryone who signed up for alerts, with when they joined.")
             subs_btn = gr.Button("Show subscribers", variant="primary")
             subs_out = gr.Markdown()
             subs_table = gr.Dataframe(label="Subscribers", value=_subscribers_table_empty, wrap=True)
             subs_btn.click(admin_show_subscribers, inputs=[admin_password], outputs=[subs_out, subs_table])
 
-        with gr.Column():
+        with gr.Column(elem_classes="fg-card"):
             gr.Markdown("### Alerts sent\nEvery rain or flood alert sent to a subscriber, and whether it was delivered.")
             sent_btn = gr.Button("Show alerts sent", variant="primary")
             sent_out = gr.Markdown()
             sent_table = gr.Dataframe(label="Alerts sent", value=_deliveries_table_empty, wrap=True)
             sent_btn.click(admin_show_alerts_sent, inputs=[admin_password], outputs=[sent_out, sent_table])
 
-        with gr.Column():
+        with gr.Column(elem_classes="fg-card"):
             gr.Markdown(
                 "### Run the automatic forecast check now (owner only)\n"
                 "Normally runs every 6 hours by itself. This sends real alerts to "
@@ -1675,7 +2115,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         return gr.update(visible=show)
 
     demo.load(_reveal_admin, None, admin_tab)
-    demo.load(_usage_stats, None, usage_md)
+    demo.load(_dashboard_html, None, dash_html)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
