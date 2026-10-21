@@ -41,6 +41,7 @@ uptime service (such as UptimeRobot) to ping the site every few minutes to
 keep it awake.
 """
 
+import base64
 import json
 import os
 import re
@@ -1639,6 +1640,44 @@ def _day_columns_html(day_counts):
     return f'<div class="fg-cols">{"".join(cols)}</div>'
 
 
+def _interp(value, value_pts, pos_pts):
+    """Straight-line position between the zone edges. Past the last edge = 100."""
+    if value <= 0:
+        return 0.0
+    for i in range(1, len(value_pts)):
+        if value <= value_pts[i]:
+            span = value_pts[i] - value_pts[i - 1]
+            frac = (value - value_pts[i - 1]) / span if span else 1.0
+            return pos_pts[i - 1] + frac * (pos_pts[i] - pos_pts[i - 1])
+    return 100.0
+
+
+def _lane_position(level, mm, wl):
+    """Where the marker sits on the bar (0-100) and what is driving the risk.
+    Both signals are placed on the same four-zone bar using the same
+    thresholds the risk rules use (rain against the rain limits, river level
+    against the river limits). The marker follows the higher of the two, then
+    is kept inside the zone that matches the risk level shown on the badge,
+    so the bar and the badge can never disagree."""
+    m, w = FLOOD_RAINFALL_THRESHOLD_MM, FLOOD_WATER_THRESHOLD_M
+    pos_pts = [0.0, 20.0, 100.0 * 0.65 / 1.5, 100.0 * 1.25 / 1.5, 100.0]   # zone edges on the bar
+    rain_pos = _interp(mm, [0, 0.3 * m, 0.65 * m, 1.25 * m, 1.5 * m], pos_pts)
+    water_pos = _interp(wl, [0, 0.6 * w, 0.8 * w, 1.25 * w, 1.5 * w], pos_pts)
+    pos, driver = (water_pos, "river level") if water_pos > rain_pos else (rain_pos, "forecast rain")
+    idx = _LEVEL_ORDER.index(level)
+    lo, hi = pos_pts[idx], pos_pts[idx + 1]
+    if pos < lo:
+        driver = ""   # the numbers don't explain the level, so don't claim a reason
+    if mm >= m and wl >= w:
+        driver = "rain and river together"   # the combined rule is what made it critical
+    pad = min(3.0, (hi - lo) / 4)
+    if pos < lo + pad:
+        pos = lo + (hi - lo) * (0.3 if pos < lo else 0.0) + (pad if pos >= lo else 0.0)
+    elif pos > hi - pad:
+        pos = hi - pad if pos <= hi else hi - (hi - lo) * 0.3
+    return max(lo + pad, min(hi - pad, pos)), driver
+
+
 def _place_card_html(r):
     level = _lvl(r)
     mm = float(r.get("rainfall_mm") or 0)
@@ -1653,13 +1692,15 @@ def _place_card_html(r):
     bands = "".join(
         f'<div style="width:{w:.2f}%;background:{_LEVEL_COLORS[n]}"></div>' for w, n in zip(widths, _LEVEL_ORDER)
     )
-    pos = min(100.0, 100.0 * mm / scale)
+    pos, driver = _lane_position(level, mm, wl)
     river = f" · river {wl:.1f} m" if wl > 0 else ""
+    why = f'<div class="fg-pwhy">Risk set by the {driver}</div>' if (driver and level != "LOW") else ""
     return (
         '<div class="fg-pcard">'
         f'<div class="fg-ptop"><span class="fg-pname">{_e(r.get("community"))}</span>{_risk_badge_html(level)}</div>'
         f'<div class="fg-band">{bands}<div class="fg-mark" style="left:{pos:.1f}%"></div></div>'
         f'<div class="fg-pmeta">{_mm(mm)} mm forecast{_e(river)}</div>'
+        f'{why}'
         f'<div class="fg-pts">Checked {_e(r.get("timestamp"))}</div>'
         '</div>'
     )
@@ -1687,7 +1728,7 @@ def _watching_strip_html():
     if not rows:
         return ""
     chips = "".join(
-        f'<span class="fg-chip"><i class="fg-dot" style="background:'
+        f'<span class="fg-chip"><i class="fg-dot{" fg-blink" if _lvl(r) == "CRITICAL" else ""}" style="background:'
         f'{_LEVEL_COLORS[_lvl(r)]}"></i>'
         f'{_e(r.get("community"))}</span>' for r in rows
     )
@@ -1745,8 +1786,9 @@ def _dashboard_html():
     if watched:
         cards = "".join(_place_card_html(r) for r in watched)
         watched_html = (f'<div class="fg-pgrid">{cards}</div>'
-                        '<div class="fg-note">The bar shows forecast rain for the next 24 hours against the '
-                        'green, amber, orange and red risk zones. The dark marker is where each place is now.</div>')
+                        '<div class="fg-note">The dark marker shows how close each place is to danger, from the green zone '
+                        '(low) to the red zone (critical). It follows whichever is worse: the rain forecast for the next '
+                        '24 hours, or the river level.</div>')
     else:
         watched_html = '<div class="fg-empty">No places are being watched yet. A place appears here once someone signs up for its alerts.</div>'
 
@@ -1863,10 +1905,16 @@ footer { opacity: 0.6; }
 /* ---------- Header: logo, name, one line ---------- */
 .fg-hero2 {
     display: flex; align-items: center; gap: 16px;
-    padding: 22px 20px;
+    padding: 30px 22px;
+    min-height: 140px;
     border-radius: 20px;
-    background: linear-gradient(135deg, #DDF2F1 0%, #F4F9F9 100%);
+    /* the flood photo shows through on the right; a light wash on the left
+       keeps the dark text easy to read */
+    background:
+        linear-gradient(90deg, rgba(244,249,249,0.97) 0%, rgba(244,249,249,0.90) 45%, rgba(244,249,249,0.50) 100%)__HERO_LAYER__,
+        linear-gradient(135deg, #DDF2F1 0%, #F4F9F9 100%);
     border: 1px solid #DCE9EA;
+    overflow: hidden;
 }
 .fg-logo { width: 64px; height: 64px; border-radius: 16px; margin: 0 !important; flex: none;
            box-shadow: 0 4px 14px rgba(11,61,92,0.25); }
@@ -1895,7 +1943,13 @@ button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
 .fg-strip-t { font-size: 13px; font-weight: 700; color: #5B7479; text-transform: uppercase; letter-spacing: .05em; margin-right: 4px; }
 .fg-chip { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 999px;
            background: #FFFFFF; border: 1px solid #DCE9EA; font-size: 14px; font-weight: 700; color: #12343B; }
-.fg-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+.fg-dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+/* CRITICAL places: the red light blinks and pulses so it can't be missed */
+.fg-blink { animation: fg-blink 1.2s ease-in-out infinite; }
+@keyframes fg-blink {
+    0%, 100% { opacity: 1;    box-shadow: 0 0 0 0 rgba(201,42,42,0.65); }
+    50%      { opacity: 0.2;  box-shadow: 0 0 0 7px rgba(201,42,42,0); }
+}
 
 /* ---------- Check result card ---------- */
 .fg-result { background: #FFFFFF; border: 1px solid #DCE9EA; border-radius: 18px; padding: 20px;
@@ -1955,6 +2009,7 @@ button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
 .fg-mark { position: absolute; top: -4px; width: 6px; height: 20px; margin-left: -3px; border-radius: 3px;
            background: #12343B; border: 2px solid #fff; box-sizing: content-box; }
 .fg-pmeta { font-size: 14px; color: #12343B; margin-top: 12px; font-weight: 700; }
+.fg-pwhy { font-size: 13px; color: #3F6168; margin-top: 3px; }
 .fg-pts { font-size: 12px; color: #5B7479; margin-top: 2px; }
 .fg-cols { display: flex; align-items: flex-end; gap: 4px; height: 150px; padding-top: 4px; }
 .fg-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 0; }
@@ -1978,7 +2033,7 @@ button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
 @media (max-width: 520px) {
     .fg-title { font-size: 28px; }
     .fg-head { font-size: 22px; }
-    .fg-hero2 { padding: 16px; }
+    .fg-hero2 { padding: 20px 16px; min-height: 120px; }
 }
 """
 
@@ -2020,6 +2075,15 @@ try:
         _BLOCKS_EXTRA["head"] = _BRAND_HEAD
 except Exception:
     _BLOCKS_EXTRA = {}
+
+# The flood photo (hero.jpg, next to this file) is embedded straight into the
+# CSS. If the file is missing the header simply shows the light gradient.
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hero.jpg"), "rb") as _hf:
+        _hero_layer = ', url("data:image/jpeg;base64,' + base64.b64encode(_hf.read()).decode() + '") center / cover no-repeat'
+except Exception:
+    _hero_layer = ""
+FLOODGUARD_CSS = FLOODGUARD_CSS.replace("__HERO_LAYER__", _hero_layer)
 
 _HERO_HTML = (
     '<div class="fg-hero2">'
