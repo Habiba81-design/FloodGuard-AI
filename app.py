@@ -1694,13 +1694,11 @@ def _place_card_html(r):
     )
     pos, driver = _lane_position(level, mm, wl)
     river = f" · river {wl:.1f} m" if wl > 0 else ""
-    why = f'<div class="fg-pwhy">Risk set by the {driver}</div>' if (driver and level != "LOW") else ""
     return (
         '<div class="fg-pcard">'
         f'<div class="fg-ptop"><span class="fg-pname">{_e(r.get("community"))}</span>{_risk_badge_html(level)}</div>'
         f'<div class="fg-band">{bands}<div class="fg-mark" style="left:{pos:.1f}%"></div></div>'
         f'<div class="fg-pmeta">{_mm(mm)} mm forecast{_e(river)}</div>'
-        f'{why}'
         f'<div class="fg-pts">Checked {_e(r.get("timestamp"))}</div>'
         '</div>'
     )
@@ -1908,18 +1906,20 @@ footer { opacity: 0.6; }
     padding: 30px 22px;
     min-height: 140px;
     border-radius: 20px;
-    /* the flood photo shows through on the right; a light wash on the left
-       keeps the dark text easy to read */
+    /* the flood photo shows evenly across the whole header, with one light,
+       even wash on top (no heavier wash on the left) */
     background:
-        linear-gradient(90deg, rgba(244,249,249,0.97) 0%, rgba(244,249,249,0.90) 45%, rgba(244,249,249,0.50) 100%)__HERO_LAYER__,
+        linear-gradient(rgba(244,249,249,0.50), rgba(244,249,249,0.50))__HERO_LAYER__,
         linear-gradient(135deg, #DDF2F1 0%, #F4F9F9 100%);
     border: 1px solid #DCE9EA;
     overflow: hidden;
 }
 .fg-logo { width: 64px; height: 64px; border-radius: 16px; margin: 0 !important; flex: none;
            box-shadow: 0 4px 14px rgba(11,61,92,0.25); }
-.fg-title { font-size: 34px; font-weight: 800; color: #0B3D5C; line-height: 1.1; }
-.fg-tag { font-size: 17px; color: #3F6168; margin-top: 6px; line-height: 1.35; }
+.fg-title { font-size: 34px; font-weight: 800; color: #0B3D5C; line-height: 1.1;
+            text-shadow: 0 0 10px rgba(255,255,255,0.95), 0 0 3px rgba(255,255,255,0.9); }
+.fg-tag { font-size: 17px; color: #12343B; margin-top: 6px; line-height: 1.35; font-weight: 600;
+          text-shadow: 0 0 10px rgba(255,255,255,0.95), 0 0 3px rgba(255,255,255,0.9); }
 
 /* ---------- Section headings: clear order of importance ---------- */
 .fg-h2 { font-size: 22px; font-weight: 800; color: #12343B; margin: 4px 0 2px 0; }
@@ -2009,7 +2009,6 @@ button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
 .fg-mark { position: absolute; top: -4px; width: 6px; height: 20px; margin-left: -3px; border-radius: 3px;
            background: #12343B; border: 2px solid #fff; box-sizing: content-box; }
 .fg-pmeta { font-size: 14px; color: #12343B; margin-top: 12px; font-weight: 700; }
-.fg-pwhy { font-size: 13px; color: #3F6168; margin-top: 3px; }
 .fg-pts { font-size: 12px; color: #5B7479; margin-top: 2px; }
 .fg-cols { display: flex; align-items: flex-end; gap: 4px; height: 150px; padding-top: 4px; }
 .fg-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 0; }
