@@ -1983,7 +1983,21 @@ footer { opacity: 0.6; }
     padding: 18px !important;
     box-shadow: 0 2px 10px rgba(11,61,92,0.06) !important;
 }
-#fg-search textarea, #fg-search input { font-size: 18px !important; }
+/* the search box: clear frame, search icon, and a glow when you tap into it,
+   so it is obvious this is where you type */
+#fg-search {
+    border: 2px solid #0B7F83 !important;
+    border-radius: 12px !important;
+    background: #FFFFFF !important;
+    box-shadow: 0 0 0 4px rgba(11,127,131,0.10) !important;
+}
+#fg-search:focus-within { box-shadow: 0 0 0 4px rgba(11,127,131,0.28) !important; }
+#fg-search textarea, #fg-search input {
+    font-size: 18px !important;
+    padding-left: 40px !important;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%230B7F83' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") no-repeat 10px center / 20px !important;
+}
+#fg-search textarea::placeholder, #fg-search input::placeholder { color: #6F8A8E !important; opacity: 1 !important; }
 #fg-go button, #fg-go { font-size: 17px !important; font-weight: 700 !important; }
 
 /* ---------- Tabs ---------- */
@@ -2091,7 +2105,7 @@ button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
     .fg-head { font-size: 22px; }
     .fg-hero2 { padding: 20px 16px; min-height: 120px; }
     .gradio-container { padding-left: 8px !important; padding-right: 8px !important; }
-    .fg-card { padding: 14px !important; }
+    .fg-card { padding: 12px !important; gap: 10px !important; }
     .fg-panel { padding-left: 14px; padding-right: 14px; }
 }
 """
@@ -2162,9 +2176,9 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             gr.HTML('<div class="fg-h2">Check your area</div>'
                     '<div class="fg-h2s">Type a village, town or city. Add the district for small places.</div>')
             with gr.Row():
-                place_in = gr.Textbox(show_label=False, container=False, scale=4, elem_id="fg-search",
-                                      placeholder="e.g. Dungu, Tamale, Ghana")
-                check_btn = gr.Button("Check", variant="primary", scale=1, elem_id="fg-go")
+                place_in = gr.Textbox(label="Type your place here", scale=4, min_width=220, elem_id="fg-search",
+                                      placeholder="e.g. Dungu, Tamale")
+                check_btn = gr.Button("Check", variant="primary", scale=1, min_width=120, elem_id="fg-go")
         place_out = gr.HTML()
         check_btn.click(check_my_area_visual, inputs=place_in, outputs=place_out)
         place_in.submit(check_my_area_visual, inputs=place_in, outputs=place_out)
