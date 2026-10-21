@@ -1168,6 +1168,58 @@ def check_my_area(place_name):
     )
 
 
+def _pill_html(text, color):
+    return f'<span class="fg-pill" style="background:{color}">{_e(text)}</span>'
+
+
+def _admin_subscribers_html(table, limit=300):
+    """Subscribers as stacked rows (not a wide table), so it fits a phone."""
+    if table is None or table.empty:
+        return ""
+    rows = []
+    for r in table.head(limit).to_dict("records"):
+        color = "#0E9AA7" if r.get("channel") == "SMS" else "#1C7ED6"
+        rows.append(
+            '<div class="fg-arow"><div class="fg-amain">'
+            f'<span class="fg-ap">{_e(r.get("place"))}</span>'
+            f'<span class="fg-at">{_e(r.get("contact"))} · joined {_e(r.get("subscribed_at"))}</span></div>'
+            f'{_pill_html(r.get("channel"), color)}</div>'
+        )
+    more = f'<div class="fg-note">Showing the newest {limit} of {len(table)}.</div>' if len(table) > limit else ""
+    return f'<div class="fg-panel fg-list">{"".join(rows)}{more}</div>'
+
+
+def _admin_alerts_html(table, limit=300):
+    """Sent alerts as stacked rows, newest first, with failures in red."""
+    if table is None or table.empty:
+        return ""
+    rows = []
+    for r in table.head(limit).to_dict("records"):
+        ok = r.get("status") == "sent"
+        detail = "" if ok or not r.get("detail") else f'<span class="fg-fail">{_e(r.get("detail"))}</span>'
+        level = str(r.get("risk_level") or "LOW").upper()
+        badge = _risk_badge_html(level) if level in _LEVEL_ORDER else ""
+        rows.append(
+            '<div class="fg-arow"><div class="fg-amain">'
+            f'<span class="fg-ap">{_e(r.get("place"))}</span>'
+            f'<span class="fg-at">{_e(r.get("alert_type"))} · {_e(r.get("sent_at"))}</span>'
+            f'<span class="fg-at">{_e(r.get("channel"))} to {_e(r.get("recipient"))}</span>{detail}</div>'
+            f'<div class="fg-side">{badge}{_pill_html("Sent" if ok else "Failed", "#2F9E44" if ok else "#C92A2A")}</div></div>'
+        )
+    more = f'<div class="fg-note">Showing the newest {limit} of {len(table)}.</div>' if len(table) > limit else ""
+    return f'<div class="fg-panel fg-list">{"".join(rows)}{more}</div>'
+
+
+def admin_subscribers_view(password):
+    msg, table = admin_show_subscribers(password)
+    return msg, _admin_subscribers_html(table)
+
+
+def admin_alerts_view(password):
+    msg, table = admin_show_alerts_sent(password)
+    return msg, _admin_alerts_html(table)
+
+
 def _subscribers_table():
     rows = db.get_subscribers_full()
     cols = ["subscribed_at", "place", "channel", "contact"]
@@ -2027,12 +2079,20 @@ button[role="tab"][aria-selected="true"] { color: #0B7F83 !important; }
 .fg-arow:last-child { border-bottom: none; }
 .fg-amain { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .fg-ap { font-weight: 800; color: #12343B; font-size: 16px; }
-.fg-at { color: #5B7479; font-size: 13px; }
+.fg-at { color: #5B7479; font-size: 13px; overflow-wrap: anywhere; }
+.fg-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.fg-pill { display: inline-block; padding: 3px 12px; border-radius: 999px; color: #fff; font-size: 12px; font-weight: 700; flex: none; }
+.fg-fail { color: #C92A2A; font-size: 12px; overflow-wrap: anywhere; }
+.fg-list { padding-top: 4px; margin-top: 10px; }
+.fg-card .fg-list { border: none; box-shadow: none; padding-left: 0; padding-right: 0; }
 
 @media (max-width: 520px) {
     .fg-title { font-size: 28px; }
     .fg-head { font-size: 22px; }
     .fg-hero2 { padding: 20px 16px; min-height: 120px; }
+    .gradio-container { padding-left: 8px !important; padding-right: 8px !important; }
+    .fg-card { padding: 14px !important; }
+    .fg-panel { padding-left: 14px; padding-right: 14px; }
 }
 """
 
@@ -2160,15 +2220,15 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             gr.Markdown("### Subscribers\nEveryone who signed up for alerts, with when they joined.")
             subs_btn = gr.Button("Show subscribers", variant="primary")
             subs_out = gr.Markdown()
-            subs_table = gr.Dataframe(label="Subscribers", value=_subscribers_table_empty, wrap=True)
-            subs_btn.click(admin_show_subscribers, inputs=[admin_password], outputs=[subs_out, subs_table])
+            subs_list = gr.HTML()
+            subs_btn.click(admin_subscribers_view, inputs=[admin_password], outputs=[subs_out, subs_list])
 
         with gr.Column(elem_classes="fg-card"):
             gr.Markdown("### Alerts sent\nEvery rain or flood alert sent to a subscriber, and whether it was delivered.")
             sent_btn = gr.Button("Show alerts sent", variant="primary")
             sent_out = gr.Markdown()
-            sent_table = gr.Dataframe(label="Alerts sent", value=_deliveries_table_empty, wrap=True)
-            sent_btn.click(admin_show_alerts_sent, inputs=[admin_password], outputs=[sent_out, sent_table])
+            sent_list = gr.HTML()
+            sent_btn.click(admin_alerts_view, inputs=[admin_password], outputs=[sent_out, sent_list])
 
         with gr.Column(elem_classes="fg-card"):
             gr.Markdown(
