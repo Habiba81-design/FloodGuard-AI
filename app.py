@@ -185,6 +185,11 @@ def _send_email(to_email, subject, body):
         return False, str(e)
 
 
+# SMS is switched OFF for now: alerts go by email only. To turn it back on
+# later, add SMS_ENABLED=true on Render (and keep the Arkesel keys set).
+SMS_ENABLED = os.environ.get("SMS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _send_sms(to_phone, body):
     """Send one SMS through Arkesel's v2 API (Ghana). to_phone is +233XXXXXXXXX;
     Arkesel wants it without the +. Needs ARKESEL_API_KEY and ARKESEL_SENDER_ID."""
@@ -475,7 +480,7 @@ def _short_sms(community, level, rainfall_mm, flood_alert, info, window_start):
 def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_level_m=None,
                         forecast=False, window_start=None, window_end=None,
                         info=None, flood_alert=True, water_tracked=True):
-    """Send a real email/SMS to everyone subscribed to this place. Called for
+    """Send a real email (and SMS, only if SMS_ENABLED) to everyone subscribed to this place. Called for
     both flood alerts (HIGH/CRITICAL risk) and rain heads-ups (light, moderate or heavy). The
     caller decides when to send; this just builds and delivers the message.
     Returns a short markdown summary."""
@@ -523,7 +528,7 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
             failed += 0 if ok else 1
             if not ok:
                 reasons.add(f"email: {why}")
-        if s.get("phone"):
+        if s.get("phone") and SMS_ENABLED:
             ok, why = _send_sms(s["phone"], sms_message)
             _log("SMS", s["phone"], ok, why)
             sent_sms += 1 if ok else 0
@@ -531,7 +536,8 @@ def _dispatch_outbound(community, level, reasoning, rainfall_mm=None, water_leve
             if not ok:
                 reasons.add(f"SMS: {why}")
 
-    summary = f"\n\n**Outbound alert:** {sent_email} email(s) and {sent_sms} SMS sent to contacts in {community}."
+    summary = (f"\n\n**Outbound alert:** {sent_email} email(s) and {sent_sms} SMS sent to contacts in {community}."
+               if SMS_ENABLED else f"\n\n**Outbound alert:** {sent_email} email(s) sent to contacts in {community}.")
     if failed:
         summary += f" {failed} delivery attempt(s) failed. Reason(s): " + "; ".join(sorted(reasons))
     return summary
@@ -1112,7 +1118,7 @@ def check_my_area(place_name):
 
     signup_note = (
         f"*Want a warning before {_ALERT_WORD} reaches this area? Scroll down and "
-        "sign up with your phone number or email.*"
+        "sign up with your email.*"
     )
     forecast_note = (
         "*Forecasts cover a wide area and can miss local showers or get the timing "
@@ -1269,7 +1275,9 @@ def _normalize_contact(channel, raw):
     use email instead. Email works for everyone."""
     raw = (raw or "").strip()
     if not raw:
-        return None, "Enter your phone number or email first."
+        return None, ("Enter your phone number or email first." if SMS_ENABLED else "Enter your email address first.")
+    if channel == "SMS" and not SMS_ENABLED:
+        return None, "SMS alerts are not available yet. Please sign up with your email address."
     if channel == "SMS":
         num = re.sub(r"[\s\-().]", "", raw)
         if num.startswith("00"):
@@ -1727,7 +1735,7 @@ def _dashboard_html():
         _kpi_html(len(subs), "Subscribers", f"{recent} joined in the last 7 days")
         + _kpi_html(len(place_counts), "Places covered")
         + _kpi_html(len(events), "Alerts issued")
-        + _kpi_html(len(sent), "Messages sent", rate)
+        + _kpi_html(len(sent), "Messages sent" if (SMS_ENABLED or sms_n) else "Emails sent", rate)
     )
 
     try:
@@ -1743,8 +1751,11 @@ def _dashboard_html():
         watched_html = '<div class="fg-empty">No places are being watched yet. A place appears here once someone signs up for its alerts.</div>'
 
     if dels:
-        delivery_html = _donut_html([(email_n, "#1C7ED6", "Email"), (sms_n, "#0E9AA7", "SMS"), (failed_n, "#E8590C", "Failed")],
-                                    f"{round(100 * len(sent) / len(dels))}%")
+        parts = [(email_n, "#1C7ED6", "Email")]
+        if SMS_ENABLED or sms_n:
+            parts.append((sms_n, "#0E9AA7", "SMS"))
+        parts.append((failed_n, "#E8590C", "Failed"))
+        delivery_html = _donut_html(parts, f"{round(100 * len(sent) / len(dels))}%")
     else:
         delivery_html = '<div class="fg-empty">No alerts have been sent yet.</div>'
 
@@ -2039,9 +2050,9 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
         with gr.Column(elem_classes="fg-card"):
             gr.HTML('<div class="fg-h2">Get free alerts for this place</div>'
                     '<div class="fg-h2s">We message you when heavy rain or flooding is likely. '
-                    'SMS works for Ghana numbers, email works from anywhere.</div>')
-            su_channel = gr.Radio(["SMS", "Email"], value="SMS", label="1. How should we reach you?")
-            su_contact = gr.Textbox(label="Phone number or email", placeholder="0201234567 or name@email.com")
+                    'Alerts come by email.</div>')
+            su_channel = gr.State("Email")   # email only for now (SMS is switched off)
+            su_contact = gr.Textbox(label="1. Your email address", placeholder="name@email.com")
             su_consent = gr.Checkbox(label=f"I agree to receive {_ALERT_WORD} and flood alerts for this place. I can stop any time.")
             su_send_btn = gr.Button("Send me a code", variant="primary")
             su_send_out = gr.Markdown()
@@ -2057,7 +2068,7 @@ with gr.Blocks(title="FloodGuard AI", theme=gr.themes.Soft(primary_hue="teal", s
             gr.Markdown(
                 "1. **We read the weather forecast** for your place, hour by hour.\n"
                 "2. **We rate the flood risk** from Low to Critical, using the rain and, where there is a river, its level.\n"
-                "3. **We message you** before the rain, so you have time to prepare.\n\n"
+                "3. **We email you** before the rain, so you have time to prepare.\n\n"
                 "**Rain strength:** Light is drizzle. Moderate is steady rain (about 2.5 to 8 mm an hour). "
                 "Heavy is 8 mm an hour or more, or 30 mm or more in a day."
             )
